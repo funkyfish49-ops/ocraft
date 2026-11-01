@@ -2884,10 +2884,14 @@ function padAxisVal(pad, name) {
     const value = ix !== undefined && pad.axes ? (pad.axes[ix] ?? 0) : 0;
     return Math.abs(value) < GAMEPAD_DEADZONE ? 0 : value;
 }
-/** Live button/axis monitor plus the guided calibration wizard, ported from Tournament Arena. */
+/** Live button/axis monitor plus the guided calibration wizard, ported from Tournament Arena.
+    v1.2.1 hardening: d-pad hats and triggers that share one axis no longer deadlock the
+    release gate (an opposite push counts as a new press, not a held one), one-frame spikes
+    on extra axes can no longer be captured (dwell), locks stuck on a phantom axis
+    self-release with a hint after 10s, and UNDO steps back to retry. */
 const PadSetup = {
     open: false, mode: 'test', step: 0, stepT: 0, sample: null, result: null, cool: null, _t: 0,
-    el: null, info: null, test: null, cal: null, done: null, prompt: null,
+    el: null, info: null, test: null, cal: null, done: null, undo: null, prompt: null,
     STEPS: [
         { k: 'a', label: 'PRESS A / SOUTH BUTTON (JUMP)' },
         { k: 'b', label: 'PRESS B / EAST BUTTON (INVENTORY)' },
@@ -2912,6 +2916,26 @@ const PadSetup = {
         return 'display:inline-block;margin:2px 4px;padding:2px 7px;border:1px solid ' + (on ? '#7fca52' : '#3a4152') +
             ';border-radius:4px;color:' + (on ? '#fff' : '#8a93a8') + ';background:' + (on ? '#3f6b2f' : 'transparent') + ';';
     },
+    /** Fresh per-step sample: at-rest axis baselines plus the in-progress lock state. */
+    blank(pad) {
+        return { base: pad && pad.axes ? pad.axes.slice(0, 16) : [], locked: -1, lockedType: null, zero: 0, full: 0, peak: 0, dir: 0, cand: -1, candT: 0 };
+    },
+    /** First axis deflected beyond `thr` from its baseline, held for 0.12s. The dwell
+        window filters the one-frame spikes some controllers emit on extra axes. */
+    dwellAxis(s, pad, thr, dt) {
+        let found = -1;
+        for (let i = 0; pad.axes && i < pad.axes.length; i++) {
+            const base = s.base[i] !== undefined ? s.base[i] : 0;
+            if (Math.abs((pad.axes[i] || 0) - base) > thr) { found = i; break; }
+        }
+        if (found < 0 || s.cand !== found) {
+            s.cand = found;
+            s.candT = 0;
+            return -1;
+        }
+        s.candT += dt;
+        return s.candT >= 0.12 ? found : -1;
+    },
     ensure() {
         if (this.el)
             return;
@@ -2933,10 +2957,14 @@ const PadSetup = {
         this.cal = document.createElement('button');
         this.cal.textContent = 'CALIBRATE';
         this.cal.style.cssText = 'padding:8px 16px;background:#3f6b2f;border:1px solid #7fca52;color:#fff;border-radius:4px;cursor:pointer;font-family:monospace;';
+        this.undo = document.createElement('button');
+        this.undo.textContent = 'UNDO';
+        this.undo.style.cssText = 'padding:8px 16px;background:#4a3a20;border:1px solid #a8843c;color:#fff;border-radius:4px;cursor:pointer;font-family:monospace;';
         this.done = document.createElement('button');
         this.done.textContent = 'DONE';
         this.done.style.cssText = 'padding:8px 16px;background:#2a3244;border:1px solid #5a6478;color:#fff;border-radius:4px;cursor:pointer;font-family:monospace;';
         row.appendChild(this.cal);
+        row.appendChild(this.undo);
         row.appendChild(this.done);
         box.appendChild(title);
         box.appendChild(this.info);
@@ -2948,6 +2976,7 @@ const PadSetup = {
         this.el = overlay;
         const self = this;
         this.cal.addEventListener('click', () => self.startCal());
+        this.undo.addEventListener('click', () => self.undoStep());
         this.done.addEventListener('click', () => {
             if (self.mode === 'cal')
                 self.cancelCal();
@@ -2965,6 +2994,7 @@ const PadSetup = {
         this.el.style.display = 'flex';
         this.prompt.style.display = 'none';
         this.cal.style.display = '';
+        this.undo.style.display = 'none';
         this.done.textContent = 'DONE';
         const pad = getGamepad();
         if (!pad)
@@ -2983,6 +3013,7 @@ const PadSetup = {
             this.el.style.display = 'none';
             this.prompt.style.display = 'none';
             this.cal.style.display = '';
+            this.undo.style.display = 'none';
             this.done.textContent = 'DONE';
         }
     },
@@ -2991,6 +3022,7 @@ const PadSetup = {
         this.result = null;
         this.prompt.style.display = 'none';
         this.cal.style.display = '';
+        this.undo.style.display = 'none';
         this.done.textContent = 'DONE';
         this.setInfo('CALIBRATION CANCELLED.');
         this.refreshMonitor(getGamepad());
@@ -3006,14 +3038,34 @@ const PadSetup = {
         this.stepT = 0;
         this.cool = null;
         this.result = { buttons: {}, axes: {} };
-        this.sample = { base: pad.axes ? pad.axes.slice(0, 16) : [], locked: -1, lockedType: null, zero: 0, full: 0, peak: 0, dir: 0 };
+        this.sample = this.blank(pad);
         this.cal.style.display = 'none';
+        this.undo.style.display = '';
         this.done.textContent = 'CANCEL';
         this.prompt.style.display = 'block';
         this.showPrompt();
     },
     showPrompt() {
         this.prompt.textContent = 'STEP ' + (this.step + 1) + '/' + this.STEPS.length + ': ' + this.STEPS[this.step].label;
+    },
+    undoStep() {
+        if (this.mode !== 'cal')
+            return;
+        const target = Math.max(0, this.step - 1);
+        const def = this.STEPS[target];
+        if (this.result) {
+            delete this.result.buttons[def.k];
+            delete this.result.axes[def.k];
+        }
+        this.step = target;
+        this.stepT = 0;
+        this.cool = null;
+        // keep the at-rest baselines, only clear the in-progress lock: if an input is
+        // already deflected it gets picked up right away, which is what a retry wants
+        const keep = (this.sample && this.sample.base) || [];
+        this.sample = Object.assign(this.blank(getGamepad()), { base: keep.slice() });
+        this.setInfo('STEP UNDONE - let go of the controller, then follow the prompt.');
+        this.showPrompt();
     },
     nextStep() {
         this.stepT = 0;
@@ -3023,9 +3075,13 @@ const PadSetup = {
             return;
         }
         this.showPrompt();
-        // snapshot axis baselines at prompt start (the previous input has been released by then)
-        const pad0 = getGamepad();
-        this.sample = { base: pad0 && pad0.axes ? pad0.axes.slice(0, 16) : [], locked: -1, lockedType: null, zero: 0, full: 0, peak: 0, dir: 0 };
+        // clear the in-progress lock/candidate state but KEEP the at-rest baselines:
+        // at capture time the input may still be deflected (d-pad hats share axes), so
+        // re-snapshotting here would poison the baseline, corrupt the saved zero for the
+        // next capture and wedge the release gate. The gate re-snapshots (blank) once
+        // the captured input is fully released, so baselines stay at-rest accurate.
+        const keep = (this.sample && this.sample.base) || [];
+        this.sample = Object.assign(this.blank(getGamepad()), { base: keep.slice() });
     },
     finish() {
         savePadMap(this.result);
@@ -3033,6 +3089,7 @@ const PadSetup = {
         this.result = null;
         this.prompt.style.display = 'none';
         this.cal.style.display = '';
+        this.undo.style.display = 'none';
         this.done.textContent = 'DONE';
         this.setInfo('CALIBRATION SAVED - THIS CONTROLLER NOW WORKS WITH THE GAME. WATCH THE CHIPS BELOW WHILE PRESSING BUTTONS TO CHECK.');
         this.refreshMonitor(getGamepad());
@@ -3077,17 +3134,33 @@ const PadSetup = {
         // release gate: the input captured for the previous step must be let go first,
         // so a held button can never be captured again for the next prompt
         if (this.cool) {
-            let still = false;
-            if (this.cool.type === 'button')
-                still = !!(pad.buttons[this.cool.index] && pad.buttons[this.cool.index].pressed);
-            else
-                still = Math.abs((pad.axes[this.cool.index] || 0) - this.cool.base) > 0.2;
-            if (still)
-                return;
-            this.cool = null;
-            // the captured input is fully released: refresh axis baselines so the next
-            // prompt can never capture the release itself (d-pad hats share axes)
-            this.sample = { base: pad.axes ? pad.axes.slice(0, 16) : [], locked: -1, lockedType: null, zero: 0, full: 0, peak: 0, dir: 0 };
+            if (this.cool.type === 'button') {
+                const cb = pad.buttons && pad.buttons[this.cool.index];
+                const cv = cb && cb.value !== undefined ? cb.value : (cb && cb.pressed ? 1 : 0);
+                if (cb && (cb.pressed || cv > 0.3))
+                    return;
+            }
+            else {
+                const v = (pad.axes && pad.axes[this.cool.index]) || 0;
+                const off = v - this.cool.base;
+                const cap = (this.cool.full !== undefined ? this.cool.full : this.cool.base) - this.cool.base;
+                if (Math.abs(off) > 0.6 && cap !== 0 && off * cap < 0) {
+                    // an opposite push on the same axis (d-pad hats, triggers that share
+                    // one axis) is a NEW press, not the old one still held: let it through
+                    // without rebasing, so the next prompt captures it right here
+                    this.cool = null;
+                    this.sample.cand = -1;
+                    this.sample.candT = 0;
+                }
+                else if (Math.abs(off) > 0.2)
+                    return;
+            }
+            if (this.cool) {
+                // fully released: refresh axis baselines so the next prompt can never
+                // capture the release itself (d-pad hats share axes)
+                this.cool = null;
+                this.sample = this.blank(pad);
+            }
         }
         const def = this.STEPS[this.step];
         this.stepT += dt;
@@ -3098,26 +3171,41 @@ const PadSetup = {
             // stick calibration: watch for an axis leaving its baseline, lock, then release
             const s = this.sample;
             if (s.locked < 0) {
-                for (let i = 0; pad.axes && i < pad.axes.length; i++) {
-                    const base = s.base[i] !== undefined ? s.base[i] : 0;
-                    if (Math.abs((pad.axes[i] || 0) - base) > 0.6) {
-                        s.locked = i;
-                        s.peak = pad.axes[i] || 0;
-                        s.dir = (pad.axes[i] || 0) > base ? 1 : -1;
-                        break;
-                    }
+                const li = this.dwellAxis(s, pad, 0.6, dt);
+                if (li >= 0) {
+                    s.locked = li;
+                    s.peak = pad.axes[li] || 0;
+                    s.dir = (pad.axes[li] || 0) > (s.base[li] !== undefined ? s.base[li] : 0) ? 1 : -1;
+                    s.lockT = 0;
                 }
             }
             else {
                 const pv = pad.axes[s.locked] || 0;
+                const pb = s.base[s.locked] !== undefined ? s.base[s.locked] : 0;
+                s.lockT += dt;
                 if (Math.abs(pv) > Math.abs(s.peak))
                     s.peak = pv;
-                if (Math.abs(pv) < 0.18) {
-                    // normalize to the convention the game expects: up = -1, right = +1
-                    const yFlip = (def.k === 'ly' || def.k === 'ry') ? -1 : 1;
-                    P.axes[def.k] = { index: s.locked, sign: s.dir * yFlip };
-                    this.cool = { type: 'axis', index: s.locked, base: s.base[s.locked] || 0 };
-                    this.nextStep();
+                if (Math.abs(pv - pb) < 0.18) {
+                    if (Math.abs(s.peak - pb) < 0.5) {
+                        // too shallow to be a deliberate push - listen again
+                        s.locked = -1;
+                        s.cand = -1;
+                        s.candT = 0;
+                        this.setInfo('PUSH THE STICK FURTHER, THEN LET GO.');
+                    }
+                    else {
+                        // normalize to the convention the game expects: up = -1, right = +1
+                        const yFlip = (def.k === 'ly' || def.k === 'ry') ? -1 : 1;
+                        P.axes[def.k] = { index: s.locked, sign: s.dir * yFlip };
+                        this.cool = { type: 'axis', index: s.locked, base: pb, full: s.peak };
+                        this.nextStep();
+                    }
+                }
+                else if (s.lockT > 10) {
+                    s.locked = -1;
+                    s.cand = -1;
+                    s.candT = 0;
+                    this.setInfo('STILL LISTENING - LET GO OF THE STICK TO FINISH THIS STEP.');
                 }
             }
         }
@@ -3133,19 +3221,19 @@ const PadSetup = {
                         s2.locked = b2;
                         s2.zero = 0;
                         s2.full = val2;
+                        s2.lockT = 0;
                         break;
                     }
                 }
                 if (!s2.lockedType) {
-                    for (let a2 = 0; pad.axes && a2 < pad.axes.length; a2++) {
-                        const base2 = s2.base[a2] !== undefined ? s2.base[a2] : 0;
-                        if (Math.abs((pad.axes[a2] || 0) - base2) > 0.55) {
-                            s2.lockedType = 'axis';
-                            s2.locked = a2;
-                            s2.zero = base2;
-                            s2.full = pad.axes[a2] || 0;
-                            break;
-                        }
+                    const ai = this.dwellAxis(s2, pad, 0.55, dt);
+                    if (ai >= 0) {
+                        const base2 = s2.base[ai] !== undefined ? s2.base[ai] : 0;
+                        s2.lockedType = 'axis';
+                        s2.locked = ai;
+                        s2.zero = base2;
+                        s2.full = pad.axes[ai] || 0;
+                        s2.lockT = 0;
                     }
                 }
             }
@@ -3155,8 +3243,10 @@ const PadSetup = {
                     const b3 = pad.buttons[s2.locked];
                     cur = b3 && b3.value !== undefined ? b3.value : (b3 && b3.pressed ? 1 : 0);
                 }
-                else
+                else {
                     cur = pad.axes[s2.locked] || 0;
+                    s2.lockT += dt;
+                }
                 if (Math.abs(cur - s2.zero) > Math.abs(s2.full - s2.zero))
                     s2.full = cur;
                 if (Math.abs(cur - s2.zero) < 0.12) {
@@ -3165,13 +3255,22 @@ const PadSetup = {
                         : { axis: s2.locked, zero: s2.zero, full: s2.full };
                     this.cool = s2.lockedType === 'button'
                         ? { type: 'button', index: s2.locked }
-                        : { type: 'axis', index: s2.locked, base: s2.zero };
+                        : { type: 'axis', index: s2.locked, base: s2.zero, full: s2.full };
                     this.nextStep();
+                }
+                else if (s2.lockedType === 'axis' && s2.lockT > 10) {
+                    // a phantom lock (spike-then-gone axis) must not wedge the wizard
+                    s2.lockedType = null;
+                    s2.locked = -1;
+                    s2.cand = -1;
+                    s2.candT = 0;
+                    this.setInfo('STILL LISTENING - HOLD THE TRIGGER, THEN LET GO COMPLETELY.');
                 }
             }
         }
         else {
-            // digital button: first pressed button wins; d-pads reported on axes (e.g. Luna) captured via deflection
+            // digital button: first pressed button wins; d-pads reported on axes (e.g. Luna,
+            // NVIDIA Shield) captured via deflection, with dwell so spikes cannot win
             let got = false;
             for (let b4 = 0; pad.buttons && b4 < pad.buttons.length; b4++) {
                 const pb = pad.buttons[b4];
@@ -3186,15 +3285,13 @@ const PadSetup = {
             }
             if (!got) {
                 const s3 = this.sample;
-                for (let a3 = 0; pad.axes && a3 < pad.axes.length; a3++) {
-                    const base3 = s3 && s3.base[a3] !== undefined ? s3.base[a3] : 0;
+                const a3 = this.dwellAxis(s3, pad, 0.6, dt);
+                if (a3 >= 0) {
+                    const base3 = s3.base[a3] !== undefined ? s3.base[a3] : 0;
                     const v3 = pad.axes[a3] || 0;
-                    if (Math.abs(v3 - base3) > 0.6) {
-                        P.buttons[def.k] = { axis: a3, zero: base3, full: v3 };
-                        this.cool = { type: 'axis', index: a3, base: base3 };
-                        this.nextStep();
-                        break;
-                    }
+                    P.buttons[def.k] = { axis: a3, zero: base3, full: v3 };
+                    this.cool = { type: 'axis', index: a3, base: base3, full: v3 };
+                    this.nextStep();
                 }
             }
         }
