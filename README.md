@@ -26,6 +26,21 @@ Ocraft ("oceans minecraft") is built on [jsminecraft](https://github.com/skurk/j
 - ⛏️ **Furnace & smelting** (ores → ingots/gems with coal), full tool tiers (dirt → emerald) and **9 armor sets** with set bonuses — full lava set = fireproof, full water set = no drowning.
 - 🪙 **Gold ore & chests**, and much more.
 
+- 🌐 **2-player online co-op** — share one world with a friend on another machine, straight from the browser: WebRTC peer-to-peer, no server, no accounts. See below.
+
+## Play with a friend (2 players, 2 machines)
+
+The world seed is baked in, so both machines generate the identical terrain on their own — only your actions travel the wire.
+
+1. Both of you open the same live page (the URL above) on your own machines.
+2. Player 1: on the title screen click **Play with a friend → HOST A GAME** → copy the **link code** → send it to your friend (any chat app).
+3. Player 2: click **Play with a friend → JOIN A GAME** → paste the link code → **CONNECT** → copy the **reply code** → send it back.
+4. Player 1: paste the reply code → **CONNECT**. A moment later you're in one world: build together, fight mobs together, trade items by dropping them.
+
+**What syncs:** both players (you see each other as little avatars with nametags), every block either of you places or breaks (the whole build history replays when Player 2 joins late), mobs (host-simulated — combat, taming, spawn eggs all work from either side), item drops & pickups, dragon riding (either player can ride; the dragon obeys whoever is on it), the day/night clock, and Verity — the T-chat works for both players, with the host running its brain and toasts shared.
+
+**Notes & limits:** the connection is direct browser-to-browser via WebRTC (Google STUN for matchmaking); a few strict corporate/campus networks can block it. Thrown projectiles (skeleton arrows, coconuts, dragon fire) only hit the player on the host's screen. Villagers are local to each machine. If Player 2 disconnects, Player 1 keeps playing solo. Tip: test on the live GitHub Pages URL in a normal browser tab, not inside an embedded preview pane — pointer lock and clipboard copy work best there.
+
 ## Controls
 
 Mouse + WASD as usual (pointer lock, or drag-look fallback), or any gamepad — standard pads just work, and anything odd can be taught via the built-in calibration wizard (title-screen 🎮 chip → Controller Setup → CALIBRATE). **T** opens the Verity chat. Full list in-game.

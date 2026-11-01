@@ -768,9 +768,9 @@ const { Particles } = __require("src/engine/particles.js");
 const { ItemManager } = __require("src/entities/item.js");
 const { MobManager } = __require("src/entities/mobs.js");
 const { VillagerManager } = __require("src/entities/villagers.js");
-const { CAT, CHICKEN, CREEPER, DRAGON, HORSE, NIKO, PIG, SHEEP, SKELETON, SPIDER, VERITY, ZOMBIE } = __require("src/entities/mob.js");
+const { CAT, CHICKEN, CREEPER, DRAGON, HORSE, NIKO, PIG, SHEEP, SKELETON, SPIDER, VERITY, VERITY_MONSTER, ZOMBIE } = __require("src/entities/mob.js");
 
-const { Item, foodOf, isBlockItem, isStackable, itemName, toolOf } = __require("src/items/items.js");
+const { ITEMS, Item, foodOf, isBlockItem, isStackable, itemName, toolOf } = __require("src/items/items.js");
 const { Hand } = __require("src/player/hand.js");
 const { HOTBAR_SIZE, Hotbar } = __require("src/player/hotbar.js");
 const { Inventory } = __require("src/player/inventory.js");
@@ -878,14 +878,14 @@ const villagers = new VillagerManager(scene, world);
 const particles = new Particles(scene);
 mobs.onDropItem = (id, x, y, z) => items.spawn(id, x, y, z);
 // One dragon at most, and it pays to know the moment it lands.
-mobs.onDragonSpawn = () => hud.showToast('A wild dragon has landed nearby \u2014 craft dragon fruit to earn its trust');
+mobs.onDragonSpawn = () => MP.toast('A wild dragon has landed nearby \u2014 craft dragon fruit to earn its trust');
 mobs.onVerityChatter = (line) => {
     const hint = VerityChat.hinted ? '' : '  (press T to talk to it)';
     VerityChat.hinted = true;
-    hud.showToast('Verity: ' + line + hint);
+    MP.toast('Verity: ' + line + hint);
 };
 mobs.onVerityTransform = () => {
-    hud.showToast('Verity: YOU WILL NOT NEED ANYONE ELSE.');
+    MP.toast('Verity: YOU WILL NOT NEED ANYONE ELSE.');
     audio.playHit();
 };
 mobs.onVerityTask = (done) => {
@@ -899,13 +899,13 @@ mobs.onVerityTask = (done) => {
             audio.playHit(blockSurface(blockId));
             for (const drop of blockDrops(blockId))
                 items.spawn(drop, x + 0.5, y + 0.2, z + 0.5);
-            hud.showToast('Verity mined ' + BLOCKS[blockId].name);
+            MP.toast('Verity mined ' + BLOCKS[blockId].name);
         }
     }
     else if (done.kind === 'fight-done')
-        hud.showToast('Verity: It is done. You are welcome.');
+        MP.toast('Verity: It is done. You are welcome.');
     else if (done.kind === 'timeout')
-        hud.showToast('Verity: I lost it. Ask me again.');
+        MP.toast('Verity: I lost it. Ask me again.');
 };
 /** Seconds Verity makes you wait between gifts. */
 const VERITY_GIFT_COOLDOWN = 30;
@@ -976,9 +976,15 @@ const VerityChat = {
             this.show();
     },
     say(line) {
-        hud.showToast('Verity: ' + line);
+        MP.toast('Verity: ' + line);
     },
     handle(text) {
+        // On the guest, Verity lives on the host: forward the words, the reply
+        // comes back through the shared toasts.
+        if (MP.role === 'guest' && Net.connected) {
+            Net.send('vCmd', { t: text });
+            return;
+        }
         const ball = mobs.verity();
         if (!ball) {
             const monster = mobs.mobs.find((m) => m.type.id === 'veritymonster' && !m.dying);
@@ -1120,6 +1126,8 @@ mobs.onShoot = (origin, direction, damage, shot) => {
 
 mobs.onExplode = (position, power) => explosions.spawn(position, power);
 items.onThrownBreak = (id, position, hitPlayer) => {
+    if (MP.role === 'host' && Net.connected)
+        Net.send('itemBreak', { b: id, x: MP.round2(position.x), y: MP.round2(position.y), z: MP.round2(position.z) });
     if (id === Item.Egg && Math.random() < EGG_HATCH_CHANCE)
         mobs.spawnAt(CHICKEN, position.clone());
     else if (id === Item.Coconut) {
@@ -1140,7 +1148,7 @@ items.onThrownBreak = (id, position, hitPlayer) => {
         particles.burst(0xf2eadb, position.x, position.y, position.z, 10, 0.5);
         particles.burst(0xb03a2c, position.x, position.y, position.z, 8, 0.4);
         mobs.spawnAt(DRAGON, position.clone().setY(position.y + 0.4));
-        hud.showToast('The egg hatches \u2014 a dragon emerges! Tame it with dragon fruit');
+        MP.toast('The egg hatches \u2014 a dragon emerges! Tame it with dragon fruit');
     }
 };
 
@@ -1603,6 +1611,11 @@ input.onKeyPress = (code) => {
             PadSetup.close();
         return;
     }
+    if (MP.panelOpen) {
+        if (code === 'Escape')
+            MP.closePanel();
+        return;
+    }
     if (code === 'KeyE' || code === 'Escape') {
         if (hud.controlsOpen)
             hud.hideControls();
@@ -1672,7 +1685,10 @@ input.onMouseDown = (button) => {
         const mobFirst = (target?.distance ?? Infinity) <= (villager?.distance ?? Infinity);
         if (target && mobFirst && target.distance < blockDistance) {
             attackTimer = ATTACK_COOLDOWN;
-            target.mob.hurt(damage, knockback);
+            if (MP.role === 'guest')
+                MP.hitRemoteMob(target.mob, damage, knockback);
+            else
+                target.mob.hurt(damage, knockback);
         }
         else if (villager && villager.distance < blockDistance) {
             attackTimer = ATTACK_COOLDOWN;
@@ -1682,11 +1698,17 @@ input.onMouseDown = (button) => {
     else if (button === 2) {
         const creature = mobs.raycast(eye, direction, REACH);
         if (creature && creature.mob.type === DRAGON && creature.distance < blockDistance) {
-            useOnDragon(creature.mob);
+            if (MP.role === 'guest')
+                MP.useRemoteDragon(creature.mob);
+            else
+                useOnDragon(creature.mob);
             return;
         }
         if (creature && creature.mob.type === CAT && creature.distance < blockDistance) {
-            useOnCat(creature.mob);
+            if (MP.role === 'guest')
+                MP.useRemoteCat(creature.mob);
+            else
+                useOnCat(creature.mob);
             return;
         }
         if (SPAWN_EGGS[heldItem()] !== undefined) {
@@ -1694,7 +1716,10 @@ input.onMouseDown = (button) => {
                 hud.showToast('Point at where you want the egg to hatch');
                 return;
             }
-            useSpawnEgg(hit);
+            if (MP.role === 'guest')
+                MP.useRemoteEgg(hit);
+            else
+                useSpawnEgg(hit);
             return;
         }
         const villager = villagers.raycast(eye, direction, REACH);
@@ -1741,14 +1766,20 @@ input.onMouseDown = (button) => {
         if (held === Item.Egg) {
             if (!inventory.take(Item.Egg))
                 return;
-            items.throwItem(Item.Egg, eye, direction);
+            if (MP.role === 'guest')
+                MP.remoteThrow(Item.Egg, eye, direction);
+            else
+                items.throwItem(Item.Egg, eye, direction);
             refreshHotbar();
             return;
         }
         if (held === Item.DragonEgg) {
             if (!inventory.take(Item.DragonEgg))
                 return;
-            items.throwItem(Item.DragonEgg, eye, direction);
+            if (MP.role === 'guest')
+                MP.remoteThrow(Item.DragonEgg, eye, direction);
+            else
+                items.throwItem(Item.DragonEgg, eye, direction);
             refreshHotbar();
             return;
         }
@@ -1779,6 +1810,761 @@ input.onMouseDown = (button) => {
 };
 const mining = { block: null, progress: 0, swingTimer: 0 };// The dragon being ridden, if any; while set, the player sits above it.
 let mount = null;
+// ================== MULTIPLAYER (2 players, 2 machines, WebRTC p2p) ==================
+// The terrain seed is fixed, so both machines generate the identical world on
+// their own; only block edits, player states, mobs (host-simulated) and item
+// drops travel the wire. Connect by trading two copy-paste codes once.
+const { Net } = __require("src/net/net.js");
+const NET_MOB_TYPES = [ZOMBIE, SPIDER, CREEPER, SKELETON, CHICKEN, PIG, SHEEP, HORSE, NIKO, DRAGON, CAT, VERITY, VERITY_MONSTER];
+const MP = {
+    role: 'off',            // 'off' | 'host' | 'guest'
+    peer: null,             // last streamed state of the other player
+    peerName: 'Player 2',
+    avatar: null, avPhase: 0, avHeld: null, avHeldColor: 0,
+    panel: null, panelOpen: false,
+    editLog: new Map(),      // host: 'x,y,z' -> [x,y,z,id], replayed to late joiners
+    editQueue: [],
+    mobSeq: 1, itemSeq: 1, rideMob: 0, lastItems: 0,
+    remoteMobs: new Map(),   // guest: netId -> { mob, tx, ty, tz }
+    remoteItems: new Map(), // guest: netId -> drop
+    stateTimer: 0, mobTimer: 0, itemTimer: 0, editTimer: 0,
+    guestPos: new THREE.Vector3(1e9, 1e9, 1e9), guestHealth: 20,
+    round2(v) { return Math.round(v * 100) / 100; },
+    typeIndexOf(mob) { return NET_MOB_TYPES.indexOf(mob.type); },
+    toast(line) {
+        hud.showToast(line);
+        if (this.role === 'host' && Net.connected)
+            Net.send('say', { l: line });
+    },
+    start() {
+        Net.onStatus = (state, detail) => MP.onNetStatus(state, detail);
+        Net.on('hello', (m) => MP.onHello(m));
+        Net.on('hey', () => MP.onHey());
+        Net.on('log', (m) => MP.onLog(m));
+        Net.on('edit', (m) => MP.onEdit(m));
+        Net.on('say', (m) => hud.showToast(m.l));
+        Net.on('p', (m) => MP.onPeerState(m));
+        Net.on('mobs', (m) => MP.onMobState(m));
+        Net.on('items', (m) => MP.onItemState(m));
+        Net.on('mobSpawn', (m) => MP.onMobSpawnMsg(m));
+        Net.on('mobGone', (m) => MP.onMobGoneMsg(m.id));
+        Net.on('itemGone', (m) => MP.removeRemoteItem(m.id));
+        Net.on('itemBreak', (m) => MP.onItemBreakMsg(m));
+        Net.on('mobHit', (m) => MP.onMobHitMsg(m));
+        Net.on('mobUse', (m) => MP.onMobUseMsg(m));
+        Net.on('pickup', (m) => MP.onPickupMsg(m.id));
+        Net.on('throw', (m) => MP.onThrowMsg(m));
+        Net.on('vCmd', (m) => VerityChat.handle(m.t));
+        Net.on('pHit', (m) => MP.onPHitMsg(m));
+        world.onSetBlock = (x, y, z, id) => MP.onLocalSetBlock(x, y, z, id);
+        mobs.onMobSpawn = (mob) => MP.onLocalMobSpawn(mob);
+        mobs.onMobGone = (mob) => MP.onLocalMobGone(mob);
+        items.onSpawn = (drop) => MP.onLocalItemSpawn(drop);
+        items.onGone = (drop) => MP.onLocalItemGone(drop);
+        MP.ensureTitleButton();
+    },
+    // ----- local hooks -----
+    onLocalSetBlock(x, y, z, id) {
+        this.editLog.set(x + ',' + y + ',' + z, [x, y, z, id]);
+        if (!world._remoteEdit)
+            this.editQueue.push([x, y, z, id]);
+    },
+    onLocalMobSpawn(mob) {
+        if (this.role !== 'host')
+            return;
+        mob.netId = this.mobSeq++;
+        if (Net.connected)
+            Net.send('mobSpawn', { id: mob.netId, t: this.typeIndexOf(mob), x: this.round2(mob.position.x), y: this.round2(mob.position.y), z: this.round2(mob.position.z) });
+    },
+    onLocalMobGone(mob) {
+        if (this.role === 'host' && Net.connected && mob.netId)
+            Net.send('mobGone', { id: mob.netId });
+    },
+    onLocalItemSpawn(drop) {
+        if (this.role !== 'host')
+            return;
+        drop.netId = this.itemSeq++;
+    },
+    onLocalItemGone(drop) {
+        if (this.role === 'host' && Net.connected && drop.netId)
+            Net.send('itemGone', { id: drop.netId });
+    },
+    // ----- handshake / world sync -----
+    onHello(m) {
+        this.peerName = m.name || 'Player 2';
+        Net.send('hey', {});
+    },
+    onHey() {
+        hud.showToast('Player 2 joined the world');
+        const entries = [];
+        for (const v of this.editLog.values())
+            entries.push(v);
+        const n = Math.max(1, Math.ceil(entries.length / 300));
+        for (let i = 0; i < n; i++)
+            Net.send('log', { i, n, e: entries.slice(i * 300, (i + 1) * 300) });
+    },
+    onLog(m) {
+        for (const e of m.e)
+            world.setBlockRemote(e[0], e[1], e[2], e[3]);
+        if (m.i === m.n - 1)
+            hud.showToast('World synced - press Play and go build!');
+    },
+    onEdit(m) {
+        for (const e of m.e)
+            world.setBlockRemote(e[0], e[1], e[2], e[3]);
+    },
+    flushEdits() {
+        if (!this.editQueue.length || !Net.connected)
+            return;
+        Net.send('edit', { e: this.editQueue });
+        this.editQueue = [];
+    },
+    // ----- peer player state -----
+    sendPeerState() {
+        const p = {
+            x: this.round2(player.position.x), y: this.round2(player.position.y), z: this.round2(player.position.z),
+            yaw: this.round2(player.yaw), pitch: this.round2(player.pitch),
+            h: Math.max(0, Math.ceil(player.health)), held: heldItem() ?? -1,
+            m: (Math.abs(player.velocity.x) + Math.abs(player.velocity.z)) > 0.5 ? 1 : 0,
+        };
+        if (mount && mount.netId)
+            p.r = { id: mount.netId, x: this.round2(mount.position.x), y: this.round2(mount.position.y), z: this.round2(mount.position.z), yaw: this.round2(mount.yaw) };
+        Net.send('p', p, true);
+    },
+    onPeerState(m) {
+        this.peer = { x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: m.pitch, held: m.held, m: m.m };
+        if (this.role !== 'host')
+            return;
+        this.guestPos.set(m.x, m.y, m.z);
+        this.guestHealth = m.h;
+        if (m.r) {
+            const mob = mobs.mobs.find((x) => x.netId === m.r.id);
+            if (mob) {
+                // While the guest rides, the guest drives that dragon; the host
+                // freezes its AI and mirrors the streamed pose.
+                mob.ridden = true;
+                mob.position.set(m.r.x, m.r.y, m.r.z);
+                mob.yaw = m.r.yaw;
+                mob.mesh.position.set(m.r.x, m.r.y, m.r.z);
+                mob.mesh.rotation.y = m.r.yaw;
+            }
+            this.rideMob = m.r.id;
+        }
+        else if (this.rideMob) {
+            const mob = mobs.mobs.find((x) => x.netId === this.rideMob);
+            if (mob)
+                mob.ridden = false;
+            this.rideMob = 0;
+        }
+    },
+    hostPlayers() {
+        if (this.role !== 'host' || !Net.connected || this.guestPos.x > 1e8)
+            return null;
+        return [player, {
+            position: this.guestPos,
+            health: this.guestHealth,
+            eyePosition: new THREE.Vector3(this.guestPos.x, this.guestPos.y + 1.55, this.guestPos.z),
+            damage(amount) { Net.send('pHit', { d: Math.round(amount * 10) / 10 }); return true; },
+            applyKnockback(x, z, up) { Net.send('pHit', { d: 0, kx: Math.round(x * 100) / 100, kz: Math.round(z * 100) / 100, ky: up }); },
+        }];
+    },
+    onPHitMsg(m) {
+        if (m.d)
+            player.damage(m.d);
+        if (m.kx !== undefined)
+            player.applyKnockback(m.kx, m.kz, m.ky || 0);
+    },
+    // ----- mobs (host authoritative) -----
+    sendMobState() {
+        const l = [];
+        for (const mob of mobs.mobs) {
+            if (!mob.netId)
+                continue;
+            const dx = mob.position.x - this.guestPos.x;
+            const dy = mob.position.y - this.guestPos.y;
+            const dz = mob.position.z - this.guestPos.z;
+            if (dx * dx + dy * dy + dz * dz > 8100 && !mob.tamed && mob.netId !== this.rideMob)
+                continue;
+            let flags = 0;
+            if (mob.tamed) flags |= 1;
+            if (mob.saddled) flags |= 2;
+            if (mob.armored) flags |= 4;
+            if (mob.dying) flags |= 8;
+            if (mob.hurtTimer > 0) flags |= 16;
+            if (mob.ridden) flags |= 32;
+            if (mob.provoked) flags |= 64;
+            l.push([mob.netId, this.typeIndexOf(mob), this.round2(mob.position.x), this.round2(mob.position.y), this.round2(mob.position.z), this.round2(mob.yaw), flags, Math.max(0, Math.ceil(mob.health))]);
+        }
+        Net.send('mobs', { l, d: Math.round(day.time * 10000) / 10000 }, true);
+    },
+    onMobState(m) {
+        if (typeof m.d === 'number')
+            day.time = m.d;
+        for (const e of m.l) {
+            const id = e[0];
+            let rec = this.remoteMobs.get(id);
+            if (!rec)
+                rec = this.spawnRemoteMob(id, e[1], e[2], e[3], e[4]);
+            if (!rec)
+                continue;
+            rec.tx = e[2]; rec.ty = e[3]; rec.tz = e[4];
+            const mob = rec.mob;
+            mob.tamed = !!(e[6] & 1);
+            mob.saddled = !!(e[6] & 2);
+            mob.armored = !!(e[6] & 4);
+            mob.dying = !!(e[6] & 8);
+            mob.hurtTimer = (e[6] & 16) ? 0.25 : 0;
+            mob.ridden = !!(e[6] & 32);
+            mob.provoked = !!(e[6] & 64);
+            mob.health = e[7];
+            mob.tyaw = e[5];
+        }
+    },
+    onMobSpawnMsg(m) {
+        if (!this.remoteMobs.has(m.id))
+            this.spawnRemoteMob(m.id, m.t, m.x, m.y, m.z);
+    },
+    spawnRemoteMob(id, ti, x, y, z) {
+        const type = NET_MOB_TYPES[ti];
+        if (!type)
+            return null;
+        const mob = mobs.spawnAt(type, new THREE.Vector3(x, y, z));
+        mob.netId = id;
+        const rec = { mob, tx: x, ty: y, tz: z };
+        this.remoteMobs.set(id, rec);
+        return rec;
+    },
+    onMobGoneMsg(id) {
+        const rec = this.remoteMobs.get(id);
+        if (!rec)
+            return;
+        const i = mobs.mobs.indexOf(rec.mob);
+        if (i >= 0)
+            mobs.remove(i);
+        this.remoteMobs.delete(id);
+    },
+    updateRemoteMobs(dt) {
+        const k = 1 - Math.exp(-dt * 14);
+        for (const rec of this.remoteMobs.values()) {
+            const mob = rec.mob;
+            const moved = Math.hypot(rec.tx - mob.position.x, rec.tz - mob.position.z);
+            mob.position.x += (rec.tx - mob.position.x) * k;
+            mob.position.y += (rec.ty - mob.position.y) * k;
+            mob.position.z += (rec.tz - mob.position.z) * k;
+            if (moved > 0.01)
+                mob.walkPhase += dt * moved * 22;
+            const target = typeof mob.tyaw === 'number' ? mob.tyaw : mob.yaw;
+            let dy = target - mob.yaw;
+            dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+            mob.yaw += dy * k;
+            mob.mesh.position.set(mob.position.x, mob.position.y, mob.position.z);
+            mob.mesh.rotation.y = mob.yaw;
+            const hurting = mob.hurtTimer > 0;
+            mob.mesh.material = hurting ? mobs.hurtMaterial : mobs.material;
+            if (!mob.dying)
+                mob.mesh.scale.setScalar(hurting ? 1.15 : 1);
+        }
+    },
+    hitRemoteMob(mob, damage, knockback) {
+        if (mob && mob.netId)
+            Net.send('mobHit', { id: mob.netId, dmg: damage, kx: this.round2(knockback.x), kz: this.round2(knockback.z) });
+    },
+    onMobHitMsg(m) {
+        const mob = mobs.mobs.find((x) => x.netId === m.id);
+        if (mob)
+            mob.hurt(m.dmg, new THREE.Vector3(m.kx, 0, m.kz));
+    },
+    onMobUseMsg(m) {
+        const mob = m.kind === 'egg' ? null : mobs.mobs.find((x) => x.netId === m.id);
+        if (m.kind === 'egg') {
+            const type = NET_MOB_TYPES[m.t];
+            if (!type)
+                return;
+            const spawned = mobs.spawnAt(type, new THREE.Vector3(m.x, m.y, m.z));
+            if (type.id === 'verity')
+                spawned.tamed = true;
+            return;
+        }
+        if (!mob)
+            return;
+        if (m.kind === 'dragon') {
+            if (m.item === Item.DragonFruit) {
+                if (mob.tamed)
+                    mob.health = Math.min(mob.type.health, mob.health + 10);
+                else if (Math.random() < 0.34) {
+                    mob.tamed = true;
+                    mob.provoked = false;
+                    MP.toast('Player 2 tamed the wild dragon!');
+                }
+            }
+            else if (m.item === Item.Saddle)
+                mob.saddled = true;
+            else if (m.item === Item.DragonArmor)
+                mob.armored = true;
+        }
+        else if (m.kind === 'cat') {
+            mob.tamed = true;
+            mob.fleeTimer = 0;
+            MP.toast('Player 2 and the kitten are best friends forever!');
+        }
+    },
+    useRemoteDragon(mob) {
+        const held = heldItem();
+        if (held === Item.DragonFruit) {
+            if (!inventory.take(Item.DragonFruit))
+                return;
+            refreshHotbar();
+            Net.send('mobUse', { id: mob.netId, kind: 'dragon', item: held });
+            hud.showToast(mob.tamed ? 'The dragon enjoys the fruit' : 'The dragon sniffs the fruit...');
+            return;
+        }
+        if (!mob.tamed) {
+            hud.showToast('The dragon watches you warily - offer it dragon fruit');
+            return;
+        }
+        if (held === Item.Saddle) {
+            if (mob.saddled) {
+                hud.showToast('This dragon already wears a saddle');
+                return;
+            }
+            inventory.take(Item.Saddle);
+            refreshHotbar();
+            Net.send('mobUse', { id: mob.netId, kind: 'dragon', item: held });
+            hud.showToast('Saddle strapped on - right-click to ride');
+            return;
+        }
+        if (held === Item.DragonArmor) {
+            if (mob.armored) {
+                hud.showToast('This dragon already wears armor');
+                return;
+            }
+            inventory.take(Item.DragonArmor);
+            refreshHotbar();
+            Net.send('mobUse', { id: mob.netId, kind: 'dragon', item: held });
+            hud.showToast('Dragon armor fitted');
+            return;
+        }
+        if (mob.saddled && mob.tamed) {
+            mount = mob;
+            hud.showToast('Soaring! Space to rise, Shift to sink, R (or pad Y) to dismount');
+        }
+    },
+    useRemoteCat(mob) {
+        if (mob.tamed) {
+            hud.showToast('Your kitten purrs happily beside you');
+            return;
+        }
+        if (heldItem() !== Item.RawFish) {
+            hud.showToast('The kitten eyes you curiously - offer it a raw fish');
+            return;
+        }
+        if (!inventory.take(Item.RawFish))
+            return;
+        refreshHotbar();
+        Net.send('mobUse', { id: mob.netId, kind: 'cat', item: Item.RawFish });
+        hud.showToast('Purrr - the kitten is your best friend forever!');
+        particles.burst(0xff9ac8, mob.position.x, mob.position.y + mob.height, mob.position.z, 8, 0.4);
+    },
+    useRemoteEgg(hit) {
+        const held = heldItem();
+        let type = SPAWN_EGGS[held];
+        if (type === null)
+            type = MYSTERY_MOBS[Math.floor(Math.random() * MYSTERY_MOBS.length)];
+        if (!inventory.take(held))
+            return;
+        const spot = hit.block.clone().add(hit.normal);
+        Net.send('mobUse', { kind: 'egg', t: NET_MOB_TYPES.indexOf(type), x: spot.x + 0.5, y: spot.y + 0.05, z: spot.z + 0.5 });
+        refreshHotbar();
+        hud.showToast(type.name + ' pops out of the spawn egg!');
+        particles.burst(0xffe08a, spot.x + 0.5, spot.y + 0.6, spot.z + 0.5, 10, 0.35);
+    },
+    remoteThrow(itemId, origin, direction) {
+        Net.send('throw', { b: itemId, ox: this.round2(origin.x), oy: this.round2(origin.y), oz: this.round2(origin.z), dx: this.round2(direction.x), dy: this.round2(direction.y), dz: this.round2(direction.z) });
+    },
+    onThrowMsg(m) {
+        items.throwItem(m.b, new THREE.Vector3(m.ox, m.oy, m.oz), new THREE.Vector3(m.dx, m.dy, m.dz));
+    },
+    // ----- items (host authoritative) -----
+    sendItemState() {
+        const l = [];
+        for (const drop of items.drops) {
+            if (!drop.netId)
+                continue;
+            const dx = drop.position.x - this.guestPos.x;
+            const dy = drop.position.y - this.guestPos.y;
+            const dz = drop.position.z - this.guestPos.z;
+            if (dx * dx + dy * dy + dz * dz > 8100)
+                continue;
+            l.push([drop.netId, drop.blockId, this.round2(drop.position.x), this.round2(drop.position.y), this.round2(drop.position.z), this.round2(drop.velocity.x), this.round2(drop.velocity.y), this.round2(drop.velocity.z), drop.thrown ? 1 : 0]);
+        }
+        if (l.length || this.lastItems)
+            Net.send('items', { l }, true);
+        this.lastItems = l.length;
+    },
+    onItemState(m) {
+        for (const e of m.l) {
+            const id = e[0];
+            let drop = this.remoteItems.get(id);
+            if (!drop) {
+                drop = this.spawnRemoteItem(id, e[1], e[2], e[3], e[4]);
+                if (!drop)
+                    continue;
+            }
+            drop.netT = [e[2], e[3], e[4]];
+            drop.velocity.set(e[5], e[6], e[7]);
+            drop.thrown = !!e[8];
+        }
+    },
+    spawnRemoteItem(id, blockId, x, y, z) {
+        const drop = items.create(blockId, x, y, z);
+        if (!drop)
+            return null;
+        drop.netId = id;
+        this.remoteItems.set(id, drop);
+        return drop;
+    },
+    removeRemoteItem(id) {
+        const drop = this.remoteItems.get(id);
+        if (!drop)
+            return;
+        const i = items.drops.indexOf(drop);
+        if (i >= 0)
+            items.drops.splice(i, 1);
+        scene.remove(drop.mesh);
+        this.remoteItems.delete(id);
+    },
+    updateRemoteItems(dt) {
+        for (const [id, drop] of this.remoteItems) {
+            drop.age += dt;
+            if (drop.thrown) {
+                drop.position.x += drop.velocity.x * dt;
+                drop.position.y += drop.velocity.y * dt;
+                drop.position.z += drop.velocity.z * dt;
+                drop.velocity.y -= 24 * dt;
+            }
+            if (drop.netT) {
+                const k = 1 - Math.exp(-dt * 6);
+                drop.position.x += (drop.netT[0] - drop.position.x) * k;
+                drop.position.y += (drop.netT[1] - drop.position.y) * k;
+                drop.position.z += (drop.netT[2] - drop.position.z) * k;
+            }
+            drop.mesh.position.copy(drop.position);
+            drop.mesh.rotation.y += dt * 2.5;
+            if (drop.age > 0.9 && player.health > 0) {
+                const dx = player.position.x - drop.position.x;
+                const dy = player.position.y + 0.9 - drop.position.y;
+                const dz = player.position.z - drop.position.z;
+                if (dx * dx + dy * dy + dz * dz < 1.2) {
+                    inventory.add(drop.blockId);
+                    items.onPickup?.(drop.blockId);
+                    Net.send('pickup', { id });
+                    this.removeRemoteItem(id);
+                }
+            }
+        }
+    },
+    onPickupMsg(id) {
+        const i = items.drops.findIndex((d) => d.netId === id);
+        if (i >= 0) {
+            scene.remove(items.drops[i].mesh);
+            items.drops.splice(i, 1);
+        }
+    },
+    onItemBreakMsg(m) {
+        if (m.b === Item.Coconut)
+            particles.burst(0x6b4a26, m.x, m.y, m.z, 10, 0.5);
+        else if (m.b === Item.DragonFire) {
+            particles.burst(0xff7a1a, m.x, m.y, m.z, 12, 0.55);
+            particles.burst(0xffd23e, m.x, m.y, m.z, 8, 0.4);
+        }
+        else if (m.b === Item.DragonEgg) {
+            particles.burst(0xf2eadb, m.x, m.y, m.z, 10, 0.5);
+            particles.burst(0xb03a2c, m.x, m.y, m.z, 8, 0.4);
+        }
+    },
+    // ----- avatar -----
+    buildAvatar() {
+        const g = new THREE.Group();
+        const part = (w, h, d, color, x, y, z, pivotDown) => {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            if (pivotDown)
+                geo.translate(0, -h / 2, 0);
+            const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color }));
+            mesh.position.set(x, y, z);
+            g.add(mesh);
+            return mesh;
+        };
+        part(0.5, 0.72, 0.26, 0x2e6bd6, 0, 1.06, 0, false);
+        this.avHead = part(0.44, 0.44, 0.44, 0xe8b992, 0, 1.64, 0, false);
+        this.avArmL = part(0.16, 0.62, 0.18, 0xe8b992, -0.34, 1.36, 0, true);
+        this.avArmR = part(0.16, 0.62, 0.18, 0xe8b992, 0.34, 1.36, 0, true);
+        this.avLegL = part(0.2, 0.68, 0.22, 0x2a3550, -0.13, 0.68, 0, true);
+        this.avLegR = part(0.2, 0.68, 0.22, 0x2a3550, 0.13, 0.68, 0, true);
+        const cnv = document.createElement('canvas');
+        cnv.width = 256;
+        cnv.height = 64;
+        const cx = cnv.getContext('2d');
+        cx.fillStyle = 'rgba(8,10,16,0.75)';
+        cx.fillRect(0, 0, 256, 64);
+        cx.font = 'bold 30px monospace';
+        cx.textAlign = 'center';
+        cx.fillStyle = '#ffe08a';
+        cx.fillText(String(this.peerName).slice(0, 14), 128, 42);
+        const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cnv), depthTest: false }));
+        tag.scale.set(1.7, 0.42, 1);
+        tag.position.set(0, 2.3, 0);
+        g.add(tag);
+        scene.add(g);
+        this.avatar = g;
+    },
+    updateAvatar(dt) {
+        const p = this.peer;
+        if (!p || !Net.connected || this.role === 'off') {
+            if (this.avatar)
+                this.avatar.visible = false;
+            return;
+        }
+        if (!this.avatar)
+            this.buildAvatar();
+        this.avatar.visible = true;
+        const k = 1 - Math.exp(-dt * 14);
+        this.avatar.position.x += (p.x - this.avatar.position.x) * k;
+        this.avatar.position.y += (p.y - this.avatar.position.y) * k;
+        this.avatar.position.z += (p.z - this.avatar.position.z) * k;
+        let dy = p.yaw - this.avatar.rotation.y;
+        dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+        this.avatar.rotation.y += dy * k;
+        this.avHead.rotation.x = -(p.pitch || 0) * 0.7;
+        this.avPhase += dt * (p.m ? 9 : 0);
+        const swing = Math.sin(this.avPhase) * (p.m ? 0.75 : 0);
+        this.avArmL.rotation.x = swing;
+        this.avArmR.rotation.x = -swing;
+        this.avLegL.rotation.x = -swing;
+        this.avLegR.rotation.x = swing;
+        const heldId = p.held;
+        const color = (heldId >= 0 && ITEMS[heldId] && ITEMS[heldId].color) || 0;
+        if (color !== this.avHeldColor) {
+            this.avHeldColor = color;
+            if (this.avHeld) {
+                this.avatar.remove(this.avHeld);
+                this.avHeld = null;
+            }
+            if (color) {
+                this.avHeld = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.26, 0.26), new THREE.MeshBasicMaterial({ color }));
+                this.avHeld.position.set(0.42, 1.02, 0.3);
+                this.avatar.add(this.avHeld);
+            }
+        }
+    },
+    // ----- lifecycle -----
+    onNetStatus(state) {
+        if (state === 'open') {
+            this.role = Net.mode;
+            mobs.netRemote = this.role === 'guest';
+            items.netRemote = this.role === 'guest';
+            if (this.role === 'host') {
+                Net.send('hello', { name: 'Player 1' });
+                hud.showToast('Player 2 connected!');
+            }
+            else {
+                hud.showToast('Connected to the host - syncing the world...');
+            }
+            this.closePanel();
+        }
+        else if (state === 'disconnected' || state === 'failed') {
+            if (this.role !== 'off')
+                hud.showToast(this.role === 'host' ? 'Player 2 left the world' : 'Connection lost - back to solo');
+            this.role = 'off';
+            mobs.netRemote = false;
+            items.netRemote = false;
+            this.guestPos.set(1e9, 1e9, 1e9);
+            this.clearRemote();
+            Net.close();
+        }
+    },
+    clearRemote() {
+        for (const id of [...this.remoteMobs.keys()])
+            this.onMobGoneMsg(id);
+        for (const id of [...this.remoteItems.keys()])
+            this.removeRemoteItem(id);
+        this.peer = null;
+        this.rideMob = 0;
+    },
+    tick(dt) {
+        if (this.role === 'off' || !Net.connected) {
+            this.updateAvatar(dt);
+            return;
+        }
+        this.stateTimer += dt;
+        if (this.stateTimer >= 1 / 15) {
+            this.stateTimer = 0;
+            this.sendPeerState();
+        }
+        if (this.role === 'host') {
+            this.mobTimer += dt;
+            if (this.mobTimer >= 1 / 12) {
+                this.mobTimer = 0;
+                this.sendMobState();
+            }
+            this.itemTimer += dt;
+            if (this.itemTimer >= 0.1) {
+                this.itemTimer = 0;
+                this.sendItemState();
+            }
+        }
+        else {
+            this.updateRemoteMobs(dt);
+            this.updateRemoteItems(dt);
+        }
+        this.editTimer += dt;
+        if (this.editTimer >= 0.12) {
+            this.editTimer = 0;
+            this.flushEdits();
+        }
+        this.updateAvatar(dt);
+    },
+    // ----- title-screen panel -----
+    ensureTitleButton() {
+        try {
+            const playBtn = hud.overlay && hud.overlay.querySelector('.play-btn');
+            if (!playBtn || playBtn.parentNode.querySelector('.mp-btn'))
+                return;
+            const btn = document.createElement('button');
+            btn.className = 'difficulty-btn mp-btn';
+            btn.innerHTML = '<b>Play with a friend</b><small>2 players, 2 machines - direct link</small>';
+            btn.addEventListener('mousedown', (event) => {
+                event.stopPropagation();
+                MP.openPanel();
+            });
+            playBtn.parentNode.insertBefore(btn, playBtn.nextSibling);
+        }
+        catch (e) { }
+    },
+    openPanel() {
+        this.ensurePanel();
+        this.panelOpen = true;
+        this.panel.style.display = 'flex';
+        this.setView('choose');
+        this.setPanelStatus(Net.pc ? 'A link is already being set up.' : '');
+    },
+    closePanel() {
+        this.panelOpen = false;
+        if (this.panel)
+            this.panel.style.display = 'none';
+    },
+    setView(name) {
+        for (const key of Object.keys(this.views))
+            this.views[key].style.display = key === name ? 'block' : 'none';
+    },
+    setPanelStatus(text) {
+        if (this.statusEl)
+            this.statusEl.textContent = text;
+    },
+    ensurePanel() {
+        if (this.panel)
+            return;
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(8,10,16,0.85);z-index:90;display:none;align-items:center;justify-content:center;';
+        overlay.addEventListener('mousedown', (event) => event.stopPropagation());
+        const box = document.createElement('div');
+        box.style.cssText = 'max-width:720px;width:94vw;background:#141822;border:1px solid #5a6478;border-radius:8px;padding:18px 22px;color:#e8e8f0;font-family:monospace;box-sizing:border-box;';
+        const title = document.createElement('div');
+        title.textContent = 'PLAY WITH A FRIEND';
+        title.style.cssText = 'font-size:18px;font-weight:bold;letter-spacing:2px;margin-bottom:6px;color:#ffe08a;';
+        const sub = document.createElement('div');
+        sub.textContent = 'Two players on two machines share one world. You trade two short link codes once; after that it is a direct browser-to-browser connection - no server, no accounts. Both of you play the same live page.';
+        sub.style.cssText = 'font-size:12px;color:#aab2c4;margin-bottom:14px;line-height:1.55;';
+        this.statusEl = document.createElement('div');
+        this.statusEl.style.cssText = 'font-size:13px;color:#9fd48a;min-height:18px;margin:10px 0;';
+        this.views = {};
+        const mkView = () => {
+            const v = document.createElement('div');
+            v.style.display = 'none';
+            box.appendChild(v);
+            return v;
+        };
+        // choose view
+        const choose = mkView();
+        this.views.choose = choose;
+        const mkBtn = (label, small, fn) => {
+            const b = document.createElement('button');
+            b.innerHTML = '<b>' + label + '</b><small>' + small + '</small>';
+            b.style.cssText = 'display:block;width:100%;text-align:left;padding:10px 14px;margin:8px 0;background:#2a3244;border:1px solid #5a6478;color:#fff;border-radius:4px;cursor:pointer;font-family:monospace;';
+            b.addEventListener('mousedown', (event) => { event.stopPropagation(); fn(); });
+            return b;
+        };
+        choose.appendChild(mkBtn('HOST A GAME', 'Generate a link code for your friend', () => { MP.role = 'host'; MP.setView('host'); MP.setPanelStatus('Making link code...'); Net.startHost().then((code) => { MP.codeOut.value = code; MP.setPanelStatus('Send this code to your friend. Paste their reply below.'); }); }));
+        choose.appendChild(mkBtn('JOIN A GAME', 'You received a link code', () => { MP.role = 'guest'; MP.setView('guest'); MP.setPanelStatus(''); }));
+        choose.appendChild(mkBtn('CLOSE', 'Back to the title screen', () => MP.closePanel()));
+        // host view
+        const host = mkView();
+        this.views.host = host;
+        host.appendChild(this.mkLabel('YOUR LINK CODE - send this to your friend:'));
+        this.codeOut = this.mkCode();
+        host.appendChild(this.codeOut);
+        host.appendChild(this.mkBtnRow([['COPY', () => MP.copyCode(MP.codeOut.value)]]));
+        host.appendChild(this.mkLabel('PASTE YOUR FRIEND\'S REPLY CODE:'));
+        this.hostIn = this.mkCode(false);
+        host.appendChild(this.hostIn);
+        host.appendChild(this.mkBtnRow([['CONNECT', () => { MP.setPanelStatus('Connecting...'); Net.acceptGuestCode(MP.hostIn.value).catch((e) => MP.setPanelStatus('That code did not work: ' + e)); }], ['BACK', () => MP.closePanel()]]));
+        // guest view
+        const guest = mkView();
+        this.views.guest = guest;
+        guest.appendChild(this.mkLabel('PASTE THE HOST\'S LINK CODE:'));
+        this.guestIn = this.mkCode(false);
+        guest.appendChild(this.guestIn);
+        guest.appendChild(this.mkBtnRow([['CONNECT', () => { MP.setPanelStatus('Making your reply code...'); Net.startGuest(MP.guestIn.value).then((code) => { MP.replyOut.value = code; MP.setPanelStatus('Send this reply code back to the host, then wait - the world syncs automatically.'); }).catch((e) => MP.setPanelStatus('That code did not work: ' + e)); }], ['BACK', () => MP.closePanel()]]));
+        guest.appendChild(this.mkLabel('YOUR REPLY CODE - send this back to the host:'));
+        this.replyOut = this.mkCode();
+        guest.appendChild(this.replyOut);
+        guest.appendChild(this.mkBtnRow([['COPY', () => MP.copyCode(MP.replyOut.value)]]));
+        box.appendChild(title);
+        box.appendChild(sub);
+        box.appendChild(choose);
+        box.appendChild(host);
+        box.appendChild(guest);
+        box.appendChild(this.statusEl);
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+        this.panel = overlay;
+    },
+    mkLabel(text) {
+        const el = document.createElement('div');
+        el.textContent = text;
+        el.style.cssText = 'font-size:12px;color:#aab2c4;margin:12px 0 4px;';
+        return el;
+    },
+    mkCode(readonly) {
+        const el = document.createElement('textarea');
+        el.style.cssText = 'width:100%;box-sizing:border-box;height:72px;padding:8px;font:11px monospace;color:#fff;background:#0c101a;border:1px solid #5a6478;border-radius:4px;outline:none;resize:none;';
+        if (readonly !== false)
+            el.readOnly = true;
+        return el;
+    },
+    mkBtnRow(buttons) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:10px;margin-top:8px;';
+        for (const [label, fn] of buttons) {
+            const b = document.createElement('button');
+            b.textContent = label;
+            b.style.cssText = 'padding:8px 16px;background:#3f6b2f;border:1px solid #7fca52;color:#fff;border-radius:4px;cursor:pointer;font-family:monospace;';
+            b.addEventListener('mousedown', (event) => { event.stopPropagation(); fn(); });
+            row.appendChild(b);
+        }
+        return row;
+    },
+    copyCode(text) {
+        try {
+            void navigator.clipboard.writeText(text);
+            this.setPanelStatus('Copied!');
+        }
+        catch (e) {
+            this.setPanelStatus('Select the code and copy it manually.');
+        }
+    },
+};
+MP.start();
+// --- end of multiplayer block ---
 /** Odds that one dragon fruit wins a wild dragon over. */
 const DRAGON_TAME_CHANCE = 0.34;
 function updateMining(dt) {
@@ -2444,7 +3230,7 @@ function padChipUpdate(pad) {
 function pollGamepad(dt) {
     if (VerityChat.open)
         return;
-    if (PadSetup.open) {
+    if (PadSetup.open || MP.panelOpen) {
         PadSetup.update(dt);
         if (gamepadHeld.size > 0)
             gamepadHeld.clear();
@@ -2525,7 +3311,9 @@ function animate() {
     if (running && titleScreen) {
         titleScreen = false;
         hud.setTitleScreen(false);
-        placeStarterLuckyCube();
+        // The guest receives the host's monolith through the edit log instead.
+        if (MP.role !== 'guest')
+            placeStarterLuckyCube();
         giveDragonKit();
 
 
@@ -2548,7 +3336,7 @@ function animate() {
             updateRiding(dt, input);
         else
             player.update(dt, input, world);
-        mobs.update(dt, player, day, villagers);
+        mobs.update(dt, player, day, villagers, MP.hostPlayers());
 
         villagers.update(dt, player, day, mobs.mobs);
         if (!player.dead && !mount) {
@@ -2560,6 +3348,7 @@ function animate() {
         weather.update(dt, player, world, day);
     }
     // Snow falls silently, and a roof cuts the downpour off with it.
+    MP.tick(dt);
     audio.setRain(running && weather.falling && !weather.cold ? weather.intensity : 0);
     audio.setUnderwater(running && player.submerged ? 1 : 0);
     explosions.update(dt);
@@ -2773,7 +3562,7 @@ class Input {
         this.element = element;
         window.addEventListener('keydown', (event) => {
             // Keystrokes meant for the Verity chat box are not game input.
-            if (event.target && event.target.tagName === 'INPUT')
+            if (event.target && (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA'))
                 return;
             if (event.code === 'Space' || event.code.startsWith('Arrow'))
                 event.preventDefault();
@@ -4324,6 +5113,9 @@ class ItemManager {
     brightness = 1;
     onThrownBreak = null;
     onPickup = null;
+    onSpawn = null;
+    onGone = null;
+    netRemote = false;
     drops = [];
     constructor(scene, world) {
         this.scene = scene;
@@ -4359,6 +5151,7 @@ class ItemManager {
         const material = sprite ? this.spriteMaterial(itemId) : this.material;
         const drop = new ItemDrop(itemId, new THREE.Vector3(x, y, z), material, geometry);
         this.drops.push(drop);
+        this.onSpawn?.(drop);
         this.scene.add(drop.mesh);
         return drop;
     }
@@ -4390,6 +5183,9 @@ class ItemManager {
         drop.velocity.y += lift;
     }
     update(dt, player, inventory) {
+        // The guest machine renders items streamed from the host; it never simulates.
+        if (this.netRemote)
+            return;
         for (let i = this.drops.length - 1; i >= 0; i--) {
             const drop = this.drops[i];
             const collected = drop.update(dt, this.world, player);
@@ -4402,6 +5198,7 @@ class ItemManager {
             if (collected || drop.broke || drop.age > LIFETIME) {
                 this.scene.remove(drop.mesh);
                 this.drops.splice(i, 1);
+                this.onGone?.(drop);
             }
         }
     }
@@ -4470,6 +5267,9 @@ class MobManager {
     onVerityTransform = null;
     onVerityTask = null;
     onExplode = null;
+    onMobSpawn = null;
+    onMobGone = null;
+    netRemote = false;
 
     constructor(scene, world) {
         this.scene = scene;
@@ -4496,7 +5296,10 @@ class MobManager {
         this.hurtMaterial.color.setRGB(Math.min(1, brightness + 0.45), brightness * 0.18, brightness * 0.18);
         setNikoFaceBrightness(brightness);
     }
-    update(dt, player, day, prey = null) {
+    update(dt, player, day, prey = null, netPlayers = null) {
+        // The guest machine renders mobs streamed from the host; it never simulates.
+        if (this.netRemote)
+            return;
         const night = day.isNight;
         const daylight = !night;
         this.spawnTimer += dt;
@@ -4528,7 +5331,18 @@ class MobManager {
             if (distance > MOB_SIMULATION_DISTANCE)
                 continue;
             const dark = this.isDark(mob.position, night);
-            mob.update(dt, this.world, player, dark, daylight, this.difficulty, prey?.nearestPrey(mob.position, this.difficulty.aggroRange) ?? null);
+            // In multiplayer each mob hunts whichever player is closer.
+            let thePlayer = player;
+            if (netPlayers && netPlayers.length > 1) {
+                let best = null;
+                for (const np of netPlayers) {
+                    const d = mob.position.distanceTo(np.position);
+                    if (!best || d < best.d)
+                        best = { p: np, d };
+                }
+                thePlayer = best.p;
+            }
+            mob.update(dt, this.world, thePlayer, dark, daylight, this.difficulty, prey?.nearestPrey(mob.position, this.difficulty.aggroRange) ?? null);
             if (mob.pendingEgg) {
                 mob.pendingEgg = false;
                 this.onDropItem?.(Item.Egg, mob.position.x, mob.position.y + 0.3, mob.position.z);
@@ -4629,6 +5443,7 @@ class MobManager {
     remove(index) {
         const [mob] = this.mobs.splice(index, 1);
         this.scene.remove(mob.mesh);
+        this.onMobGone?.(mob);
     }
     isDark(position, night) {
         // Torchlight keeps a spot safe regardless of the sky above it.
@@ -4775,6 +5590,7 @@ class MobManager {
         const mob = new Mob(type, position, this.material, this.hurtMaterial, scale);
         this.mobs.push(mob);
         this.scene.add(mob.mesh);
+        this.onMobSpawn?.(mob);
         return mob;
     }
     canStandAt(x, y, z, type) {
@@ -10167,6 +10983,16 @@ class World {
             return Block.Air;
         return chunk.get(x - cx * CHUNK_SIZE, y, z - cz * CHUNK_SIZE);
     }
+    /** Applies an edit that arrived over the network: logged, never re-broadcast. */
+    setBlockRemote(x, y, z, id) {
+        this._remoteEdit = true;
+        try {
+            this.setBlock(x, y, z, id);
+        }
+        finally {
+            this._remoteEdit = false;
+        }
+    }
     setBlock(x, y, z, id) {
         if (y < 1 || y >= CHUNK_HEIGHT)
             return;
@@ -10182,6 +11008,8 @@ class World {
             return;
         chunk.set(lx, y, lz, id);
         chunk.dirty = true;
+        if (this.onSetBlock)
+            this.onSetBlock(x, y, z, id);
         // Breaking one half of a door takes the other half with it.
         if (isDoor(previous) && id === Block.Air) {
             const otherY = isDoorUpper(previous) ? y - 1 : y + 1;
@@ -11867,6 +12695,125 @@ class Villager {
 __exports["PROFESSION_NAMES"] = PROFESSION_NAMES;
 __exports["LEVEL_NAMES"] = LEVEL_NAMES;
 __exports["Villager"] = Villager;
+},
+"src/net/net.js": function (__exports, __require) {
+'use strict';
+/** Peer-to-peer multiplayer transport: a WebRTC data-channel pair with manual
+    copy-paste signalling (host and guest trade two short codes once, then it is a
+    direct browser-to-browser link - no server involved). testLink() wires two
+    instances together in memory so the whole protocol can be verified in Node. */
+const ICE = { iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] };
+const Net = {
+    pc: null,
+    reliable: null,
+    fast: null,
+    mode: 'off',
+    connected: false,
+    handlers: {},
+    onStatus: null,
+    on(kind, fn) { this.handlers[kind] = fn; },
+    fire(kind, msg) { const fn = this.handlers[kind]; if (fn) fn(msg); },
+    status(state, detail) { if (this.onStatus) this.onStatus(state, detail); },
+    pack(desc) { return btoa(JSON.stringify(desc)); },
+    unpack(code) { return JSON.parse(atob(String(code).trim())); },
+    wire(ch) {
+        ch.onopen = () => { this.connected = true; this.status('open'); };
+        ch.onclose = () => { if (this.connected) { this.connected = false; this.status('disconnected'); } };
+        ch.onmessage = (e) => {
+            try { const m = JSON.parse(e.data); this.fire(m.k, m); }
+            catch (err) { }
+        };
+    },
+    startHost() {
+        this.mode = 'host';
+        this.pc = new RTCPeerConnection(ICE);
+        this.reliable = this.pc.createDataChannel('ocraft-r');
+        this.fast = this.pc.createDataChannel('ocraft-u', { ordered: false, maxRetransmits: 0 });
+        this.watchState();
+        this.wire(this.reliable);
+        this.wire(this.fast);
+        return this.pc.createOffer()
+            .then((offer) => this.pc.setLocalDescription(offer))
+            .then(() => this.gather())
+            .then(() => this.pack(this.pc.localDescription));
+    },
+    acceptGuest(code) {
+        return this.pc.setRemoteDescription(this.unpack(code));
+    },
+    startGuest(code) {
+        this.mode = 'guest';
+        this.pc = new RTCPeerConnection(ICE);
+        this.pc.ondatachannel = (e) => {
+            this.wire(e.channel);
+            if (e.channel.label === 'ocraft-r')
+                this.reliable = e.channel;
+            else
+                this.fast = e.channel;
+        };
+        this.watchState();
+        return this.pc.setRemoteDescription(this.unpack(code))
+            .then(() => this.pc.createAnswer())
+            .then((answer) => this.pc.setLocalDescription(answer))
+            .then(() => this.gather())
+            .then(() => this.pack(this.pc.localDescription));
+    },
+    watchState() {
+        this.pc.onconnectionstatechange = () => {
+            if (!this.pc)
+                return;
+            if (this.pc.connectionState === 'failed' || this.pc.connectionState === 'disconnected' || this.pc.connectionState === 'closed') {
+                if (this.connected) {
+                    this.connected = false;
+                    this.status('disconnected');
+                }
+            }
+        };
+    },
+    gather() {
+        return new Promise((resolve) => {
+            if (!this.pc || this.pc.iceGatheringState === 'complete')
+                return resolve();
+            let done = false;
+            const finish = () => { if (!done) { done = true; resolve(); } };
+            const timer = setTimeout(finish, 3500);
+            this.pc.addEventListener('icegatheringstatechange', () => {
+                if (this.pc && this.pc.iceGatheringState === 'complete') {
+                    clearTimeout(timer);
+                    finish();
+                }
+            });
+        });
+    },
+    send(kind, data, fastLane) {
+        if (!this.connected)
+            return false;
+        const ch = (fastLane && this.fast && this.fast.readyState === 'open') ? this.fast : this.reliable;
+        if (!ch || ch.readyState !== 'open')
+            return false;
+        ch.send(JSON.stringify(Object.assign({ k: kind }, data || {})));
+        return true;
+    },
+    close() {
+        try { if (this.pc) this.pc.close(); }
+        catch (e) { }
+        this.pc = null;
+        this.reliable = null;
+        this.fast = null;
+        this.connected = false;
+        this.mode = 'off';
+    },
+    testLink(other) {
+        const mk = (peer) => ({
+            label: 'test',
+            readyState: 'open',
+            send: (s) => { queueMicrotask(() => { try { const m = JSON.parse(s); peer.fire(m.k, m); } catch (e) { } }); },
+        });
+        this.reliable = mk(other);
+        this.fast = mk(other);
+        this.connected = true;
+    },
+};
+__exports["Net"] = Net;
 },
 "src/engine/noise.js": function (__exports, __require) {
 'use strict';
