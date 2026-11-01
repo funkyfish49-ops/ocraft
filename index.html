@@ -2888,9 +2888,17 @@ function padAxisVal(pad, name) {
     v1.2.1 hardening: d-pad hats and triggers that share one axis no longer deadlock the
     release gate (an opposite push counts as a new press, not a held one), one-frame spikes
     on extra axes can no longer be captured (dwell), locks stuck on a phantom axis
-    self-release with a hint after 10s, and UNDO steps back to retry. */
+    self-release with a hint after 10s, and UNDO steps back to retry.
+    v1.3.2: captures are edge-armed (a button must be freshly pressed, so a pad that rests or
+    flickers a button at mid value can no longer steal a step), a get-ready grace after CALIBRATE
+    stops the grab itself being captured as the first mapping, every capture announces what it
+    learned (skips are instantly visible and UNDO-able), and d-pad up/down now moves the player
+    (vertical fallback for pads whose stick-Y the browser does not report).
+    v1.3.2b: button captures now also require a 0.12s dwell (fresh press alone is not enough),
+    so a one-frame mid-value spike on a noisy pad can no longer steal a digital step or a
+    trigger mapping - the exact class of glitch that produced a dead stick axis. */
 const PadSetup = {
-    open: false, mode: 'test', step: 0, stepT: 0, sample: null, result: null, cool: null, _t: 0,
+    open: false, mode: 'test', step: 0, stepT: 0, sample: null, result: null, cool: null, prevBtn: [], _t: 0,
     el: null, info: null, test: null, cal: null, done: null, undo: null, prompt: null,
     STEPS: [
         { k: 'a', label: 'PRESS A / SOUTH BUTTON (JUMP)' },
@@ -2918,7 +2926,7 @@ const PadSetup = {
     },
     /** Fresh per-step sample: at-rest axis baselines plus the in-progress lock state. */
     blank(pad) {
-        return { base: pad && pad.axes ? pad.axes.slice(0, 16) : [], locked: -1, lockedType: null, zero: 0, full: 0, peak: 0, dir: 0, cand: -1, candT: 0 };
+        return { base: pad && pad.axes ? pad.axes.slice(0, 16) : [], locked: -1, lockedType: null, zero: 0, full: 0, peak: 0, dir: 0, cand: -1, candT: 0, btnCand: -1, btnCandT: 0 };
     },
     /** First axis deflected beyond `thr` from its baseline, held for 0.12s. The dwell
         window filters the one-frame spikes some controllers emit on extra axes. */
@@ -3035,10 +3043,12 @@ const PadSetup = {
         }
         this.mode = 'cal';
         this.step = 0;
-        this.stepT = 0;
+        this.stepT = -1.0; // get-ready grace: hands need a moment back on the controller after the click
         this.cool = null;
+        this.prevBtn = [];
         this.result = { buttons: {}, axes: {} };
         this.sample = this.blank(pad);
+        this.setInfo('GET READY - RELAX YOUR GRIP ON THE CONTROLLER, THEN FOLLOW THE PROMPT.');
         this.cal.style.display = 'none';
         this.undo.style.display = '';
         this.done.textContent = 'CANCEL';
@@ -3131,6 +3141,17 @@ const PadSetup = {
             this.setInfo('CONTROLLER LOST - reconnect it (press any button) to continue calibration.');
             return;
         }
+        // edge-arm: remember which buttons were already down on the previous update, so a pad
+        // that rests or flickers a button at mid value can never steal a capture (it was never
+        // released, so it is never a fresh press)
+        const btnActive = [];
+        for (let bi = 0; pad.buttons && bi < pad.buttons.length; bi++) {
+            const bb = pad.buttons[bi];
+            const bv = bb && bb.value !== undefined ? bb.value : (bb && bb.pressed ? 1 : 0);
+            btnActive.push(!!(bb && (bb.pressed || bv > 0.3)));
+        }
+        const prevBtn = this.prevBtn || [];
+        this.prevBtn = btnActive;
         // release gate: the input captured for the previous step must be let go first,
         // so a held button can never be captured again for the next prompt
         if (this.cool) {
@@ -3198,6 +3219,7 @@ const PadSetup = {
                         const yFlip = (def.k === 'ly' || def.k === 'ry') ? -1 : 1;
                         P.axes[def.k] = { index: s.locked, sign: s.dir * yFlip };
                         this.cool = { type: 'axis', index: s.locked, base: pb, full: s.peak };
+                        this.setInfo(def.k.toUpperCase() + ' = STICK AXIS ' + s.locked + (s.dir > 0 ? ' (+)' : ' (-)') + '.');
                         this.nextStep();
                     }
                 }
@@ -3213,17 +3235,27 @@ const PadSetup = {
             // trigger calibration: analog button or axis, capture the zero-to-full range
             const s2 = this.sample;
             if (!s2.lockedType) {
+                // a resting or flickering button must never steal the trigger steps: the
+                // pull must be fresh (not already down on the previous update) AND held
+                // for a dwell window, exactly like the axis candidates just below
+                let cand2 = -1;
                 for (let b2 = 0; pad.buttons && b2 < pad.buttons.length; b2++) {
                     const bb = pad.buttons[b2];
                     const val2 = bb && bb.value !== undefined ? bb.value : (bb && bb.pressed ? 1 : 0);
-                    if (val2 > 0.45) {
-                        s2.lockedType = 'button';
-                        s2.locked = b2;
-                        s2.zero = 0;
-                        s2.full = val2;
-                        s2.lockT = 0;
-                        break;
-                    }
+                    if (val2 > 0.45) { cand2 = b2; break; }
+                }
+                if (cand2 >= 0 && cand2 !== s2.btnCand && prevBtn[cand2])
+                    cand2 = -1;
+                if (cand2 < 0) { s2.btnCand = -1; s2.btnCandT = 0; }
+                else if (cand2 === s2.btnCand) { s2.btnCandT += dt; }
+                else { s2.btnCand = cand2; s2.btnCandT = dt; }
+                if (s2.btnCand >= 0 && s2.btnCandT >= 0.12) {
+                    const bb2 = pad.buttons[s2.btnCand];
+                    s2.lockedType = 'button';
+                    s2.locked = s2.btnCand;
+                    s2.zero = 0;
+                    s2.full = bb2 && bb2.value !== undefined ? bb2.value : 1;
+                    s2.lockT = 0;
                 }
                 if (!s2.lockedType) {
                     const ai = this.dwellAxis(s2, pad, 0.55, dt);
@@ -3256,6 +3288,7 @@ const PadSetup = {
                     this.cool = s2.lockedType === 'button'
                         ? { type: 'button', index: s2.locked }
                         : { type: 'axis', index: s2.locked, base: s2.zero, full: s2.full };
+                    this.setInfo(def.k.toUpperCase() + ' = ' + (s2.lockedType === 'button' ? 'TRIGGER BUTTON ' + s2.locked : 'TRIGGER AXIS ' + s2.locked + (s2.full > s2.zero ? ' (+)' : ' (-)')) + '.');
                     this.nextStep();
                 }
                 else if (s2.lockedType === 'axis' && s2.lockT > 10) {
@@ -3271,26 +3304,34 @@ const PadSetup = {
         else {
             // digital button: first pressed button wins; d-pads reported on axes (e.g. Luna,
             // NVIDIA Shield) captured via deflection, with dwell so spikes cannot win
-            let got = false;
+            const s3 = this.sample;
+            let cand4 = -1;
             for (let b4 = 0; pad.buttons && b4 < pad.buttons.length; b4++) {
                 const pb = pad.buttons[b4];
                 const pv4 = pb && pb.value !== undefined ? pb.value : (pb && pb.pressed ? 1 : 0);
-                if (pb && (pb.pressed || pv4 > 0.5)) {
-                    P.buttons[def.k] = { index: b4, full: 1 };
-                    this.cool = { type: 'button', index: b4 };
-                    this.nextStep();
-                    got = true;
-                    break;
-                }
+                if (pb && (pb.pressed || pv4 > 0.5)) { cand4 = b4; break; }
             }
-            if (!got) {
-                const s3 = this.sample;
+            // a fresh press must also SUSTAIN through a dwell window: a button resting
+            // at mid value or spiking for a frame can never steal a digital step
+            if (cand4 >= 0 && cand4 !== s3.btnCand && prevBtn[cand4])
+                cand4 = -1;
+            if (cand4 < 0) { s3.btnCand = -1; s3.btnCandT = 0; }
+            else if (cand4 === s3.btnCand) { s3.btnCandT += dt; }
+            else { s3.btnCand = cand4; s3.btnCandT = dt; }
+            if (s3.btnCand >= 0 && s3.btnCandT >= 0.12) {
+                P.buttons[def.k] = { index: s3.btnCand, full: 1 };
+                this.cool = { type: 'button', index: s3.btnCand };
+                this.setInfo(def.k.toUpperCase() + ' = BUTTON ' + s3.btnCand + '. LET GO, THEN FOLLOW THE NEXT PROMPT.');
+                this.nextStep();
+            }
+            else {
                 const a3 = this.dwellAxis(s3, pad, 0.6, dt);
                 if (a3 >= 0) {
                     const base3 = s3.base[a3] !== undefined ? s3.base[a3] : 0;
                     const v3 = pad.axes[a3] || 0;
                     P.buttons[def.k] = { axis: a3, zero: base3, full: v3 };
                     this.cool = { type: 'axis', index: a3, base: base3, full: v3 };
+                    this.setInfo(def.k.toUpperCase() + ' = AXIS ' + a3 + (v3 > base3 ? ' (+)' : ' (-)') + '. LET GO, THEN FOLLOW THE NEXT PROMPT.');
                     this.nextStep();
                 }
             }
@@ -3358,9 +3399,10 @@ function pollGamepad(dt) {
         else
             input.buttons.delete(button);
     };
-    // Left stick: move. Right stick: look, through the same path as mouse deltas.
-    setKey('KeyW', axis('ly') < -GAMEPAD_MOVE_THRESHOLD);
-    setKey('KeyS', axis('ly') > GAMEPAD_MOVE_THRESHOLD);
+    // Left stick: move. D-pad up/down feeds the same keys, a vertical fallback for pads
+    // whose stick-Y the browser never reports. Right stick: look, same path as mouse deltas.
+    setKey('KeyW', axis('ly') < -GAMEPAD_MOVE_THRESHOLD || held('dpup'));
+    setKey('KeyS', axis('ly') > GAMEPAD_MOVE_THRESHOLD || held('dpdn'));
     setKey('KeyA', axis('lx') < -GAMEPAD_MOVE_THRESHOLD);
     setKey('KeyD', axis('lx') > GAMEPAD_MOVE_THRESHOLD);
     input.mouseDeltaX += axis('rx') * GAMEPAD_LOOK_SPEED * dt;
