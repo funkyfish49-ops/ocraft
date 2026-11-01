@@ -22,12 +22,13 @@ Ocraft ("oceans minecraft") is built on [jsminecraft](https://github.com/skurk/j
 - 👩 **Niko** — beach-dwelling coconut thrower with a realistic painted portrait face.
 - 🍀 **Lucky blocks** — rare gold "?" blocks; break one for 10 of a random gift. A solid 10×10×10 monolith of 1,000 lucky blocks spawns near you at game start.
 - 🥚 **Spawn eggs** — one per mob (with a little fist icon), plus a craftable **mystery egg** (gold ore + chest) that hatches a random mob.
+- 🎮 **Controller calibration** — any gamepad works, even weird ones. On the title screen, tap the 🎮 status chip (or just plug in a controller) to open **Controller Setup**: live button/axis monitor, plus a guided 18-step wizard (buttons, analog triggers, sticks, d-pad — even d-pads and triggers that hide on stick axes, like the Amazon Luna). Your mapping is saved per-controller in localStorage: calibrate once, it just works. Ported from Tournament Arena.
 - ⛏️ **Furnace & smelting** (ores → ingots/gems with coal), full tool tiers (dirt → emerald) and **9 armor sets** with set bonuses — full lava set = fireproof, full water set = no drowning.
 - 🪙 **Gold ore & chests**, and much more.
 
 ## Controls
 
-Mouse + WASD as usual (pointer lock, or drag-look fallback), or an Xbox-style gamepad (full mapping, including a Bluetooth "Navita Shield" controller). **T** opens the Verity chat. Full list in-game.
+Mouse + WASD as usual (pointer lock, or drag-look fallback), or any gamepad — standard pads just work, and anything odd can be taught via the built-in calibration wizard (title-screen 🎮 chip → Controller Setup → CALIBRATE). **T** opens the Verity chat. Full list in-game.
 
 ## License
 
