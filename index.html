@@ -2896,7 +2896,10 @@ function padAxisVal(pad, name) {
     (vertical fallback for pads whose stick-Y the browser does not report).
     v1.3.2b: button captures now also require a 0.12s dwell (fresh press alone is not enough),
     so a one-frame mid-value spike on a noisy pad can no longer steal a digital step or a
-    trigger mapping - the exact class of glitch that produced a dead stick axis. */
+    trigger mapping - the exact class of glitch that produced a dead stick axis.
+    v1.3.3: stick-drift hardening - a worn stick that rests off-center can no longer wedge the
+    wizard: the release gate re-centers after 1s of hovering below capture range, and stick or
+    trigger captures complete when the input settles just off its baseline for half a second. */
 const PadSetup = {
     open: false, mode: 'test', step: 0, stepT: 0, sample: null, result: null, cool: null, prevBtn: [], _t: 0,
     el: null, info: null, test: null, cal: null, done: null, undo: null, prompt: null,
@@ -3173,8 +3176,23 @@ const PadSetup = {
                     this.sample.cand = -1;
                     this.sample.candT = 0;
                 }
-                else if (Math.abs(off) > 0.2)
-                    return;
+                else if (Math.abs(off) > 0.2) {
+                    if (Math.abs(off) <= 0.55) {
+                        // STICK DRIFT ESCAPE: a worn stick rests slightly off-center. Below 0.55
+                        // (the lowest capture threshold) this reading can never lock anything, so
+                        // if it hovers here for a second, treat it as the new rest: re-center the
+                        // gate so a drifted stick can never wedge the wizard on the next prompt.
+                        this.cool.t = (this.cool.t || 0) + dt;
+                        if (this.cool.t > 1.0)
+                            this.cool.base = v;
+                        else
+                            return;
+                    }
+                    else {
+                        this.cool.t = 0;
+                        return;
+                    }
+                }
             }
             if (this.cool) {
                 // fully released: refresh axis baselines so the next prompt can never
@@ -3206,7 +3224,14 @@ const PadSetup = {
                 s.lockT += dt;
                 if (Math.abs(pv) > Math.abs(s.peak))
                     s.peak = pv;
-                if (Math.abs(pv - pb) < 0.18) {
+                // a worn stick often rests slightly off its baseline: "released" means back at
+                // the baseline, OR hovering just above it for half a second (stick drift)
+                const relDiff = Math.abs(pv - pb);
+                if (relDiff >= 0.45)
+                    s.settleT = 0;
+                else if (relDiff >= 0.18)
+                    s.settleT = (s.settleT || 0) + dt;
+                if (relDiff < 0.18 || (s.settleT || 0) > 0.5) {
                     if (Math.abs(s.peak - pb) < 0.5) {
                         // too shallow to be a deliberate push - listen again
                         s.locked = -1;
@@ -3281,7 +3306,14 @@ const PadSetup = {
                 }
                 if (Math.abs(cur - s2.zero) > Math.abs(s2.full - s2.zero))
                     s2.full = cur;
-                if (Math.abs(cur - s2.zero) < 0.12) {
+                // same drift class for triggers: resting just off the zero for half a second
+                // counts as released (the saved zero stays the at-arm baseline)
+                const trigDiff = Math.abs(cur - s2.zero);
+                if (trigDiff >= 0.3)
+                    s2.settleT = 0;
+                else if (trigDiff >= 0.12)
+                    s2.settleT = (s2.settleT || 0) + dt;
+                if (trigDiff < 0.12 || (s2.settleT || 0) > 0.5) {
                     P.buttons[def.k] = s2.lockedType === 'button'
                         ? { index: s2.locked, full: Math.abs(s2.full - s2.zero) || 1 }
                         : { axis: s2.locked, zero: s2.zero, full: s2.full };
