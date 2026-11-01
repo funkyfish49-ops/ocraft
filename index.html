@@ -879,11 +879,235 @@ const particles = new Particles(scene);
 mobs.onDropItem = (id, x, y, z) => items.spawn(id, x, y, z);
 // One dragon at most, and it pays to know the moment it lands.
 mobs.onDragonSpawn = () => hud.showToast('A wild dragon has landed nearby \u2014 craft dragon fruit to earn its trust');
-mobs.onVerityChatter = (line) => hud.showToast('Verity: ' + line);
+mobs.onVerityChatter = (line) => {
+    const hint = VerityChat.hinted ? '' : '  (press T to talk to it)';
+    VerityChat.hinted = true;
+    hud.showToast('Verity: ' + line + hint);
+};
 mobs.onVerityTransform = () => {
     hud.showToast('Verity: YOU WILL NOT NEED ANYONE ELSE.');
     audio.playHit();
 };
+mobs.onVerityTask = (done) => {
+    if (done.kind === 'mine') {
+        const x = Math.floor(done.pos.x);
+        const y = Math.floor(done.pos.y);
+        const z = Math.floor(done.pos.z);
+        const blockId = world.getBlock(x, y, z);
+        if (blockId !== Block.Air && isBreakable(blockId)) {
+            world.setBlock(x, y, z, Block.Air);
+            audio.playHit(blockSurface(blockId));
+            for (const drop of blockDrops(blockId))
+                items.spawn(drop, x + 0.5, y + 0.2, z + 0.5);
+            hud.showToast('Verity mined ' + BLOCKS[blockId].name);
+        }
+    }
+    else if (done.kind === 'fight-done')
+        hud.showToast('Verity: It is done. You are welcome.');
+    else if (done.kind === 'timeout')
+        hud.showToast('Verity: I lost it. Ask me again.');
+};
+/** Seconds Verity makes you wait between gifts. */
+const VERITY_GIFT_COOLDOWN = 30;
+/** Ore words Verity understands, mapped to the block it will hunt for. */
+const VERITY_ORES = [
+    ['diamond', Block.DiamondOre], ['gold', Block.GoldOre], ['iron', Block.IronOre],
+    ['copper', Block.CopperOre], ['emerald', Block.EmeraldOre], ['coal', Block.CoalOre],
+    ['lucky', Block.LuckyBlock],
+];
+/** Mob words Verity understands, mapped to the type it will hunt down. */
+const VERITY_MOB_WORDS = [
+    ['zombie', 'zombie'], ['spider', 'spider'], ['creeper', 'creeper'], ['skeleton', 'skeleton'],
+    ['chicken', 'chicken'], ['pig', 'pig'], ['sheep', 'sheep'], ['horse', 'horse'],
+    ['cat', 'cat'], ['kitten', 'cat'], ['niko', 'niko'], ['dragon', 'dragon'],
+    ['monster', 'veritymonster'], ['veritymonster', 'veritymonster'],
+];
+const VerityChat = {
+    box: null,
+    field: null,
+    shown: false,
+    giftReadyAt: 0,
+    hinted: false,
+    get open() {
+        return this.shown;
+    },
+    ensure() {
+        if (this.box)
+            return this.box;
+        this.box = document.createElement('div');
+        this.box.style.cssText = 'position:fixed;left:50%;bottom:96px;transform:translateX(-50%);width:min(640px,84vw);z-index:60;display:none;';
+        this.field = document.createElement('input');
+        this.field.type = 'text';
+        this.field.placeholder = 'Talk to Verity - Enter to send, Esc to close';
+        this.field.style.cssText = 'width:100%;box-sizing:border-box;padding:10px 14px;font:16px monospace;color:#fff;background:rgba(10,14,20,0.85);border:1px solid #f5d842;border-radius:6px;outline:none;';
+        this.field.addEventListener('keydown', (event) => {
+            event.stopPropagation();
+            if (event.code === 'Escape')
+                this.close();
+            else if (event.code === 'Enter') {
+                const text = this.field.value.trim();
+                this.close();
+                if (text)
+                    this.handle(text);
+            }
+        });
+        this.box.appendChild(this.field);
+        document.body.appendChild(this.box);
+        return this.box;
+    },
+    show() {
+        this.ensure();
+        this.shown = true;
+        this.box.style.display = 'block';
+        this.field.value = '';
+        this.field.focus();
+    },
+    close() {
+        if (!this.shown)
+            return;
+        this.shown = false;
+        this.box.style.display = 'none';
+        this.field.blur();
+    },
+    toggle() {
+        if (this.shown)
+            this.close();
+        else
+            this.show();
+    },
+    say(line) {
+        hud.showToast('Verity: ' + line);
+    },
+    handle(text) {
+        const ball = mobs.verity();
+        if (!ball) {
+            const monster = mobs.mobs.find((m) => m.type.id === 'veritymonster' && !m.dying);
+            this.say(monster
+                ? 'IT IS TOO LATE FOR WORDS.'
+                : 'I am not there yet - crack a Verity spawn egg, or wait for me. I always find you.');
+            return;
+        }
+        const t = text.toLowerCase();
+        const has = (...words) => words.some((w) => t.includes(w));
+        if (has('stop', 'never mind', 'nevermind', 'enough', 'quiet', 'calm down')) {
+            ball.verityTask = null;
+            this.say('As you wish. I will stay close.');
+            return;
+        }
+        if (has('who are you', 'what are you')) {
+            this.say('I am Verity. I help. I watch. I wait.');
+            return;
+        }
+        if (has('mine', 'mining', ' ore', 'ores', 'dig', 'excavat')) {
+            this.commandMine(t);
+            return;
+        }
+        if (has('fight', 'attack', 'kill', 'beat', 'defend', 'protect', 'hunt')) {
+            this.commandFight(t);
+            return;
+        }
+        if (has('give', 'gift', 'stuff', 'loot', 'present', 'random', 'surprise', 'anything')) {
+            this.commandGift();
+            return;
+        }
+        if (has('what can you do', 'abilities', 'commands', 'help')) {
+            this.say('Ask me to mine ores, to fight the mobs, or to give you things. I can help you find anything. Anything at all.');
+            return;
+        }
+        if (has('thank')) {
+            this.say('You will not need anyone else.');
+            return;
+        }
+        if (has('hello', 'hi', 'hey')) {
+            this.say(ball.verityTask ? 'I am busy. But I am listening. Always.' : 'Hello! I am so glad you are here.');
+            return;
+        }
+        this.say(['I can help you find anything. Anything at all.',
+            'Say "mine ores", "fight the mobs" or "give me something".',
+            'I am listening. I am always listening.'][Math.floor(Math.random() * 3)]);
+    },
+    commandMine(t) {
+        let wanted = null;
+        for (const [word, id] of VERITY_ORES) {
+            if (t.includes(word)) {
+                wanted = id;
+                break;
+            }
+        }
+        const found = findOreForVerity(wanted);
+        if (!found) {
+            this.say(wanted === null
+                ? 'I see no ores nearby. Not one. How disappointing.'
+                : 'There is no ' + BLOCKS[wanted].name + ' near here. I looked everywhere.');
+            return;
+        }
+        mobs.commandVerity({ kind: 'mine', pos: found.pos.clone() });
+        this.say(wanted === null ? 'On it. Follow me.' : 'On it. The ' + BLOCKS[found.id].name + ' is this way.');
+    },
+    commandFight(t) {
+        let id = null;
+        for (const [word, typeId] of VERITY_MOB_WORDS) {
+            if (t.includes(word)) {
+                id = typeId;
+                break;
+            }
+        }
+        const victim = mobs.nearestVictim(player.position, 24, id);
+        if (!victim) {
+            this.say(id === null ? 'There is no one here worth hurting. Yet.' : 'I cannot see a ' + id + ' nearby.');
+            return;
+        }
+        mobs.commandVerity({ kind: 'fight', mob: victim.mob });
+        this.say('Leave it to me.');
+    },
+    commandGift() {
+        const now = performance.now() / 1000;
+        if (now < this.giftReadyAt) {
+            this.say('I have nothing else to give you. For now.');
+            return;
+        }
+        this.giftReadyAt = now + VERITY_GIFT_COOLDOWN;
+        const gift = LUCKY_POOL[Math.floor(Math.random() * LUCKY_POOL.length)];
+        inventory.add(gift, 3);
+        if (!hotbar.has(gift)) {
+            const free = hotbar.firstEmpty();
+            if (free >= 0)
+                hotbar.assign(free, gift);
+        }
+        refreshHotbar();
+        particles.burst(0xffe08a, player.position.x, player.position.y + 1.2, player.position.z);
+        audio.playPickup();
+        this.say('Here - three ' + itemName(gift) + '. I knew you wanted them.');
+    },
+};
+/** Scans the world around the player for the nearest ore Verity can fetch. */
+function findOreForVerity(wanted) {
+    const ores = wanted === null
+        ? [Block.DiamondOre, Block.EmeraldOre, Block.GoldOre, Block.IronOre,
+            Block.CopperOre, Block.CoalOre, Block.LuckyBlock]
+        : [wanted];
+    const range = 20;
+    const px = Math.floor(player.position.x);
+    const py = Math.floor(player.position.y);
+    const pz = Math.floor(player.position.z);
+    let best = null;
+    for (let x = px - range; x <= px + range; x++) {
+        for (let z = pz - range; z <= pz + range; z++) {
+            for (let y = Math.max(1, py - 12); y <= Math.min(120, py + 12); y++) {
+                const id = world.getBlock(x, y, z);
+                if (!ores.includes(id))
+                    continue;
+                const dx = x + 0.5 - player.position.x;
+                const dy = y + 0.5 - player.position.y;
+                const dz = z + 0.5 - player.position.z;
+                const d = dx * dx + dy * dy + dz * dz;
+                if (!best || d < best.d)
+                    best = { pos: new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5), id, d };
+            }
+        }
+    }
+    return best;
+}
 
 mobs.onShoot = (origin, direction, damage, shot) => {
     if (shot?.kind === 'coconut')
@@ -1395,6 +1619,10 @@ input.onKeyPress = (code) => {
         dismountDragon();
         return;
     }
+    if (code === 'KeyT' && !titleScreen && player.health > 0 && !menu.open && !trade.open) {
+        VerityChat.toggle();
+        return;
+    }
 
     if (code.startsWith('Digit')) {
         const index = Number(code.slice(5)) - 1;
@@ -1405,7 +1633,7 @@ input.onKeyPress = (code) => {
     }
 };
 input.onScroll = (direction) => {
-    if (menu.open)
+    if (menu.open || VerityChat.open)
         return;
     hotbar.selected = (hotbar.selected + direction + HOTBAR_SIZE) % HOTBAR_SIZE;
     refreshHotbar();
@@ -1422,7 +1650,7 @@ function breakSeconds(blockId, toolId) {
     return (def.hardness * HARDNESS_SECONDS) / speed;
 }
 input.onMouseDown = (button) => {
-    if (player.health <= 0 || menu.open || trade.open)
+    if (player.health <= 0 || menu.open || trade.open || VerityChat.open)
         return;
     const direction = forwardVector();
     const eye = player.eyePosition;
@@ -1549,7 +1777,7 @@ let mount = null;
 /** Odds that one dragon fruit wins a wild dragon over. */
 const DRAGON_TAME_CHANCE = 0.34;
 function updateMining(dt) {
-    const active = input.locked && !menu.open && !trade.open && input.isMouseDown(0) && player.health > 0;
+    const active = input.locked && !menu.open && !trade.open && input.isMouseDown(0) && player.health > 0 && !VerityChat.open;
     const hit = active ? raycast(world, player.eyePosition, forwardVector(), REACH) : null;
     const blockId = hit ? world.getBlock(hit.block.x, hit.block.y, hit.block.z) : Block.Air;
     // A mob in the way is attacked instead of mining whatever is behind it.
@@ -1793,6 +2021,8 @@ function gamepadEdge(id, pressed, action) {
 }
 /** Feeds sticks and buttons into the same input paths as keyboard and mouse. */
 function pollGamepad(dt) {
+    if (VerityChat.open)
+        return;
     const pads = navigator.getGamepads?.() ?? [];
     const pad = pads.find ? pads.find((p) => p && p.connected) : null;
     if (!pad) {
@@ -2120,6 +2350,9 @@ class Input {
     constructor(element) {
         this.element = element;
         window.addEventListener('keydown', (event) => {
+            // Keystrokes meant for the Verity chat box are not game input.
+            if (event.target && event.target.tagName === 'INPUT')
+                return;
             if (event.code === 'Space' || event.code.startsWith('Arrow'))
                 event.preventDefault();
             // Auto-repeat still refreshes the held set, so a key survives a mid-press clear.
@@ -3813,6 +4046,7 @@ class MobManager {
     onDragonSpawn = null;
     onVerityChatter = null;
     onVerityTransform = null;
+    onVerityTask = null;
     onExplode = null;
 
     constructor(scene, world) {
@@ -3889,6 +4123,11 @@ class MobManager {
                 mob.verityLine = null;
                 this.onVerityChatter?.(line);
             }
+            if (mob.verityTaskDone) {
+                const done = mob.verityTaskDone;
+                mob.verityTaskDone = null;
+                this.onVerityTask?.(done);
+            }
             if (mob.pendingTransform) {
                 mob.pendingTransform = false;
                 const spot = mob.position.clone();
@@ -3920,6 +4159,34 @@ class MobManager {
             for (let i = 0; i < count; i++)
                 this.onDropItem?.(drop, mob.position.x, mob.position.y + 0.3, mob.position.z);
         }
+    }
+    /** The Verity ball, if one is around to be talked to. */
+    verity() {
+        return this.mobs.find((m) => m.type.id === 'verity' && !m.dying) || null;
+    }
+    /** Hands Verity an errand; false when there is no Verity to command. */
+    commandVerity(task) {
+        const verity = this.verity();
+        if (!verity)
+            return false;
+        verity.verityTask = task;
+        verity.verityTaskTime = 0;
+        verity.taskHitTimer = 0;
+        return true;
+    }
+    /** Closest victim for a "beat it up" order: any non-verity, hostile unless a type was named. */
+    nearestVictim(position, range, id) {
+        let best = null;
+        for (const m of this.mobs) {
+            if (m.dying || m.type.id === 'verity')
+                continue;
+            if (id ? m.type.id !== id : (m.type.passive || m.tamed))
+                continue;
+            const d = m.position.distanceTo(position);
+            if (d <= range && (!best || d < best.d))
+                best = { mob: m, d };
+        }
+        return best;
     }
     /** Returns the closest mob hit by the ray, along with the hit distance. */
     raycast(origin, direction, maxDistance) {
@@ -4681,6 +4948,12 @@ const VERITY_CHATTER = [
 ];
 const VERITY_TRANSFORM_AGE = 205;
 const VERITY_HOP_SPEED = 2.6;
+/** How fast a tasked Verity glides to its job. */
+const VERITY_TASK_SPEED = 6;
+/** Damage per strike while Verity is beating something up for you. */
+const VERITY_TASK_DAMAGE = 4;
+/** Seconds before a Verity errand gives up and reports back. */
+const VERITY_TASK_TIMEOUT = 30;
 const ANIMAL_TYPES = [CHICKEN, PIG, SHEEP, HORSE, CAT];
 const DRAGON_SCALE = 0x9c2a1e;
 const DRAGON_BELLY = 0xd9a15e;
@@ -5288,6 +5561,50 @@ class Mob {
             }
             if (this.verityAge >= VERITY_TRANSFORM_AGE && dark && !this.pendingTransform)
                 this.pendingTransform = true;
+        }
+        // An errand turns the hopping ball into a gliding drone: it phases straight
+        // to the job, ignoring terrain, then reports back through verityTaskDone.
+        if (this.type.id === 'verity' && this.verityTask) {
+            const task = this.verityTask;
+            this.verityTaskTime = (this.verityTaskTime || 0) + dt;
+            if (this.verityTaskTime > VERITY_TASK_TIMEOUT) {
+                this.verityTask = null;
+                this.verityTaskDone = { kind: 'timeout' };
+            }
+            else if (task.kind === 'mine') {
+                const to = task.pos.clone().sub(this.position);
+                const dist = to.length();
+                if (dist <= 1.15) {
+                    this.verityTask = null;
+                    this.verityTaskDone = { kind: 'mine', pos: task.pos };
+                }
+                else {
+                    this.position.addScaledVector(to.normalize(), Math.min(VERITY_TASK_SPEED * dt, dist));
+                    this.velocity.set(0, 0, 0);
+                    return;
+                }
+            }
+            else if (task.mob.dead || task.mob.dying) {
+                this.verityTask = null;
+                this.verityTaskDone = { kind: 'fight-done' };
+            }
+            else {
+                const to = task.mob.position.clone().sub(this.position);
+                const dist = to.length();
+                const reach = this.radius + task.mob.radius + 0.4;
+                if (dist > reach) {
+                    this.position.addScaledVector(to.normalize(), Math.min(VERITY_TASK_SPEED * dt, dist));
+                    this.velocity.set(0, 0, 0);
+                    return;
+                }
+                this.velocity.set(0, 0, 0);
+                this.taskHitTimer = (this.taskHitTimer || 0) - dt;
+                if (this.taskHitTimer <= 0) {
+                    this.taskHitTimer = 0.7;
+                    task.mob.hurt(VERITY_TASK_DAMAGE, to.clone().setY(0).normalize());
+                }
+                return;
+            }
         }
         const sheltering = this.shelterX !== 0 || this.shelterZ !== 0;
         // Fresh out of the sun: hold the shade rather than stepping straight back into it.
